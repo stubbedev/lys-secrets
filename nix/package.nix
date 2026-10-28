@@ -19,18 +19,37 @@
         );
       };
 
-      vendorHash = null;
+      # The module cache's hash; `just vendor-hash` recomputes it after a
+      # go.mod change.
+      vendorHash = "sha256-ZPocwyY2a1zdyD7QHNDs0LQvZPt/E9oZkICBwzzIQYA=";
+
+      subPackages = ["cmd/lys-secrets"];
 
       env.CGO_ENABLED = 0;
+      ldflags = ["-s" "-w"];
 
-      doCheck = true;
+      # The suite runs in `just check`: it needs private D-Bus sessions and
+      # the Secret Service clients of the dev shell.
+      doCheck = false;
+
+      # The user unit and the D-Bus activation file, for the modules to
+      # wire up. Installing the package alone activates neither, since
+      # gnome-keyring's activation file may claim the same name.
+      postInstall = ''
+        install -d $out/lib/systemd/user $out/share/dbus-1/services
+        substitute resources/lys-secrets.service $out/lib/systemd/user/lys-secrets.service \
+          --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
+        substitute resources/org.freedesktop.secrets.lys-secrets.service \
+          $out/share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service \
+          --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
+      '';
 
       meta = {
         description = "the lys desktop's freedesktop Secret Service";
         homepage = "https://github.com/stubbedev/lys-secrets";
         license = lib.licenses.mit;
         mainProgram = "lys-secrets";
-        platforms = lib.platforms.unix;
+        platforms = lib.platforms.linux;
       };
     };
   };

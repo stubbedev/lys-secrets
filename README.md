@@ -1,45 +1,119 @@
 # lys-secrets
 
-lys-secrets is the lys desktop's freedesktop Secret Service
-(`org.freedesktop.secrets`): collections encrypted at rest, unlocked at
-login by lys-login, with prompts through lys-shell's dialogs. It moves
-here from lys-shell.
+lys-secrets is the lys desktop's freedesktop
+[Secret Service](https://specifications.freedesktop.org/secret-service-spec/latest/)
+(`org.freedesktop.secrets`), so a lys desktop needs no gnome-keyring,
+KeePassXC or KWallet for app secrets. libsecret (`secret-tool`), Chromium and
+Electron apps, git's `git-credential-libsecret`, python-secretstorage and the
+portal's per-app secrets for sandboxed apps all keep their secrets in it.
 
-The implementation is tracked in the repository's issues.
+It is a small process of its own, separate from the shell: it links no UI
+and asks for passwords through the desktop's dialogs (lys-lib's
+`dev.stubbe.lys.PortalDialogs1`, served by lys-shell).
 
-## Recipes
+## Enabling it
+
+Only one program can own `org.freedesktop.secrets`. When another provider
+already owns it, `lys-secrets` logs which one and exits, so it never takes
+the name from gnome-keyring.
+
+The flake's package installs the binary, the user unit
+(`lib/systemd/user/lys-secrets.service`) and the D-Bus activation file
+(`share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service`); the
+modules wire them up:
+
+- **NixOS:** import `lys-secrets.nixosModules.default` and set
+  `services.lys-secrets.enable = true;`. It hands the activation file to
+  D-Bus and starts the user unit with the graphical session. It cannot be
+  combined with `services.gnome.gnome-keyring.enable` (evaluation fails with a
+  message).
+- **home-manager:** import `lys-secrets.homeManagerModules.default` and set
+  `services.lys-secrets.enable = true;` to do the same at the user level. Do
+  not run gnome-keyring's secrets component as well.
+- **Other distributions:** install `resources/lys-secrets.service` as a user
+  unit with the binary at `/usr/bin/lys-secrets`, disable gnome-keyring's
+  secrets component, then `systemctl --user enable --now lys-secrets`. To have
+  clients start it on demand too, copy
+  `resources/org.freedesktop.secrets.lys-secrets.service` to
+  `~/.local/share/dbus-1/services/`.
+
+## Unlocking
+
+The `login` collection is encrypted with your session password:
+
+- **lys-login's lock screen** hands the password it just verified to `lys-secrets`
+  over a socket only your user can connect to
+  (`$XDG_RUNTIME_DIR/lys-secrets/control`), never over D-Bus. The first
+  unlock creates the `login` collection with that password and makes it the
+  default.
+- **lys-login's greeter** passes it at login instead:
+  `lys-secrets --unlock-fd N` reads the password from an inherited descriptor.
+- **Anything else** (a restart, another collection, a locked keyring) asks
+  through the desktop's password dialog when an app needs a secret. A wrong
+  password asks again; cancelling leaves the collection locked.
+
+If `lys-secrets` is not running, the lock screen unlocks a running
+gnome-keyring instead, as before.
+
+Changing your login password does not re-encrypt the collection: a
+`ChangeLock` request (for example from Seahorse) asks for the new password.
+
+## Access
+
+Every program running as you on your session bus may read an unlocked
+collection, as with gnome-keyring. Sandboxed (Flatpak) apps get their secret
+through the portal, which identifies them, and their master secrets live in
+the `login` collection too.
+
+## Storage
+
+Each collection is one file, `$XDG_DATA_HOME/lys-secrets/<id>.keyring`
+(mode 0600), written atomically. Its key is derived from the password with
+Argon2id (3 passes over 64 MiB), and the contents are encrypted with
+XChaCha20-Poly1305. Only the item ids and SHA-256 hashes of their attributes
+are readable without the password, so a locked collection can tell a client
+that a matching item exists and needs an unlock; labels, attribute values
+and secrets are encrypted. While a collection is unlocked, each secret stays
+encrypted in memory and is decrypted only for the request that reads it. The
+key lives outside the Go heap, locked against swap where the memlock limit
+allows, and the process is not dumpable. The format is described in
+`internal/keyring/collection.go`.
+
+Existing gnome-keyring keyrings are not imported.
+
+## Go packages
+
+- `client`: a Secret Service client (lys-shell's Secret portal keeps the
+  per-app master secrets through it).
+- `control`: the unlock socket's client and server (lys-login unlocks the
+  login collection through it).
+- `secretstest`: the real Secret Service on a test's private bus, with
+  scripted password prompts, for consumers' tests.
+
+Everything else is `internal/`.
+
+## Development
 
 | Recipe | What it does |
 | --- | --- |
-| `just check` | Every release gate in order: vet, lint, test, build |
+| `just check` | Every release gate in order: vet, lint, test, race, build |
 | `just vet` | Static analysis with `go vet` |
-| `just lint` | `golangci-lint run` against the strict config in `.golangci.yml` |
-| `just test` | `go test ./...` |
+| `just lint` | Formatting and `golangci-lint run` against `.golangci.yml` |
+| `just test` | `go test -shuffle=on ./...` |
+| `just race` | The suite under the race detector |
 | `just build` | Compile-check every package |
 | `just fmt` | Format every Go source in place |
+| `just vendor-hash` | Recompute `nix/package.nix`'s `vendorHash` after a go.mod change |
 
-Every dev tool (Go toolchain pinned to the version go.mod declares, gopls,
-golangci-lint, delve, just, git, gh) comes from the flake: `direnv allow`
-on entry, or `nix develop` explicitly. `GOTOOLCHAIN=local` keeps the compiler
-from downloading itself.
-
-## Nix
-
-- `nix build` builds the package (`nix/package.nix`; the dev shell is
-  `nix/shell.nix`, both imported by `flake.nix`; add a `vendorHash`
-  once go.mod grows dependencies)
-- `nix run` runs it
-- `nix fmt` formats the nix files with alejandra
+The dev shell (`nix develop`, or `direnv allow`) pins the Go toolchain go.mod
+names and carries the lint stack, dbus for the tests' private session buses,
+and the Secret Service clients the service is checked against (secret-tool,
+python-secretstorage, Chromium, git's libsecret credential helper).
+`nix flake check` builds the package and evaluates the NixOS and home-manager
+modules.
 
 ## CI
 
 `.github/workflows/security.yml` runs CodeQL (Go and GitHub Actions), Grype and
 govulncheck, uploading findings to code scanning; dependency review gates
 pull requests. Dependabot keeps the module and the workflows current.
-
-## Linting
-
-`.golangci.yml` starts from the standard linter set and layers on bodyclose,
-copyloopvar, errorlint, gosec, intrange, misspell, modernize, nolintlint,
-perfsprint, revive, unconvert, unparam, usestdlibvars and whitespace, with
-gofumpt and gci as formatters. No issue caps: every finding fails the build.

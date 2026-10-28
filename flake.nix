@@ -7,6 +7,11 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+    # The home-manager module's evaluation check.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs @ {
@@ -19,6 +24,8 @@
       imports = [
         ./nix/package.nix
         ./nix/shell.nix
+        ./nix/modules.nix
+        ./nix/checks.nix
       ];
     };
 }
