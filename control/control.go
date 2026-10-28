@@ -22,8 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stubbedev/lys-lib/peercred"
 	"github.com/stubbedev/lys-lib/xdg"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -130,22 +130,12 @@ func handle(conn *net.UnixConn, u Unlocker) {
 }
 
 func samePeerUser(conn *net.UnixConn) error {
-	raw, err := conn.SyscallConn()
+	uid, err := peercred.UID(conn)
 	if err != nil {
 		return err
 	}
-	var cred *unix.Ucred
-	var credErr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil {
-		return err
-	}
-	if credErr != nil {
-		return fmt.Errorf("peer credentials: %w", credErr)
-	}
-	if int(cred.Uid) != os.Getuid() {
-		return fmt.Errorf("peer uid %d is not this user's %d", cred.Uid, os.Getuid())
+	if int(uid) != os.Getuid() {
+		return fmt.Errorf("peer uid %d is not this user's %d", uid, os.Getuid())
 	}
 	return nil
 }
