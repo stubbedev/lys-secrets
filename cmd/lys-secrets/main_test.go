@@ -15,7 +15,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	"github.com/stubbedev/lys-lib/sockdir"
 
-	"github.com/stubbedev/lys-shell/secrets/control"
+	"github.com/stubbedev/lys-secrets/control"
 )
 
 // TestMain lets the test binary be lys-secrets: the tests re-exec it

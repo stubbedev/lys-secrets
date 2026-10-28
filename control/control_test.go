@@ -11,8 +11,6 @@ import (
 	"testing"
 
 	"github.com/stubbedev/lys-lib/sockdir"
-
-	"github.com/stubbedev/lys-shell/secrets/keyring"
 )
 
 type fakeUnlocker struct {
@@ -30,7 +28,7 @@ func (f *fakeUnlocker) UnlockLogin(password []byte) error {
 		return f.err
 	}
 	if string(password) != f.want {
-		return keyring.ErrWrongPassword
+		return ErrWrongPassword
 	}
 	return nil
 }

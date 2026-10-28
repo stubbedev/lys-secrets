@@ -15,7 +15,8 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-shell/secrets/keyring"
+	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/keyring"
 )
 
 var testKDF = keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}
@@ -282,7 +283,7 @@ func TestRestartKeepsItemsBehindThePassword(t *testing.T) {
 	if !f.svc.colls[LoginID].kr.Locked() {
 		t.Fatal("a restarted service is unlocked")
 	}
-	if err := f.svc.UnlockLogin([]byte("nope")); !errors.Is(err, keyring.ErrWrongPassword) {
+	if err := f.svc.UnlockLogin([]byte("nope")); !errors.Is(err, keyring.ErrWrongPassword) || !errors.Is(err, control.ErrWrongPassword) {
 		t.Fatalf("UnlockLogin(wrong) = %v", err)
 	}
 	if !f.svc.colls[LoginID].kr.Locked() {

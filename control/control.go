@@ -23,8 +23,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/stubbedev/lys-shell/secrets/keyring"
 )
 
 const (
@@ -38,7 +36,9 @@ const maxPassword = 4096
 
 const timeout = 10 * time.Second
 
-// Errors a client tells apart.
+// Errors a client tells apart. ErrWrongPassword is also what an
+// [Unlocker] returns, or wraps, for a password that does not unlock the
+// login collection.
 var (
 	ErrNotRunning    = errors.New("lys-secrets is not running")
 	ErrWrongPassword = errors.New("lys-secrets: the password does not unlock the login collection")
@@ -53,7 +53,8 @@ func SocketPath() (string, error) {
 	return filepath.Join(dir, "lys-secrets", "control"), nil
 }
 
-// Unlocker unlocks the login collection.
+// Unlocker unlocks the login collection; a wrong password is an error
+// matching ErrWrongPassword.
 type Unlocker interface {
 	UnlockLogin(password []byte) error
 }
@@ -115,7 +116,7 @@ func handle(conn *net.UnixConn, u Unlocker) {
 	defer clear(password)
 	status := statusOK
 	switch err := u.UnlockLogin(password); {
-	case errors.Is(err, keyring.ErrWrongPassword):
+	case errors.Is(err, ErrWrongPassword):
 		status = statusWrongPassword
 		log.Printf("control: the password does not unlock the login collection")
 	case err != nil:

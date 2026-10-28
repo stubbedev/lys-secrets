@@ -29,10 +29,10 @@ import (
 	"github.com/stubbedev/lys-lib/xdg"
 	"golang.org/x/sys/unix"
 
-	"github.com/stubbedev/lys-shell/secrets/control"
-	"github.com/stubbedev/lys-shell/secrets/keyring"
-	"github.com/stubbedev/lys-shell/secrets/prompt"
-	"github.com/stubbedev/lys-shell/secrets/service"
+	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/prompt"
+	"github.com/stubbedev/lys-secrets/internal/service"
 )
 
 func main() {
@@ -67,7 +67,7 @@ func run(unlockFD int) error {
 		}
 		defer clear(password)
 	}
-	data, ok := xdg.DataHome()
+	data, ok := xdg.OS.DataHome()
 	if !ok {
 		return errors.New("neither XDG_DATA_HOME nor HOME is set")
 	}

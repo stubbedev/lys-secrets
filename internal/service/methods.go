@@ -12,7 +12,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-shell/secrets/keyring"
+	"github.com/stubbedev/lys-secrets/internal/keyring"
 )
 
 // serviceMethods is org.freedesktop.Secret.Service.

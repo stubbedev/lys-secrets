@@ -24,7 +24,8 @@ import (
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-shell/secrets/keyring"
+	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/keyring"
 )
 
 // D-Bus names of the API.
@@ -207,12 +208,17 @@ func (s *Service) now() time.Time {
 // UnlockLogin unlocks the login collection with the password the user
 // logged in or unlocked the session with, creating it with that password
 // on first use and pointing the default alias at it when none is set. A
-// wrong password is keyring.ErrWrongPassword and leaves it locked.
+// wrong password matches both control.ErrWrongPassword and
+// keyring.ErrWrongPassword, and leaves it locked.
 func (s *Service) UnlockLogin(password []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.colls[LoginID]; ok {
-		if err := c.kr.Unlock(password); err != nil {
+		err := c.kr.Unlock(password)
+		if errors.Is(err, keyring.ErrWrongPassword) {
+			return fmt.Errorf("%w: %w", control.ErrWrongPassword, err)
+		}
+		if err != nil {
 			return err
 		}
 		s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(LoginID))
