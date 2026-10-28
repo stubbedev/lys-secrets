@@ -30,12 +30,20 @@ modules wire them up:
 - **home-manager:** import `lys-secrets.homeManagerModules.default` and set
   `services.lys-secrets.enable = true;` to do the same at the user level. Do
   not run gnome-keyring's secrets component as well.
-- **Other distributions:** install `resources/lys-secrets.service` as a user
-  unit with the binary at `/usr/bin/lys-secrets`, disable gnome-keyring's
-  secrets component, then `systemctl --user enable --now lys-secrets`. To have
-  clients start it on demand too, copy
-  `resources/org.freedesktop.secrets.lys-secrets.service` to
+- **Debian, Ubuntu and Fedora:** each
+  [release](https://github.com/stubbedev/lys-secrets/releases) carries a
+  `.deb` and an `.rpm` (x86_64) with `/usr/bin/lys-secrets`, the user unit
+  and the activation file as a reference copy under `/usr/share/lys-secrets/`.
+  Installing one enables nothing. Disable gnome-keyring's secrets component,
+  then `systemctl --user enable --now lys-secrets`. To have clients start it
+  on demand too, copy
+  `/usr/share/lys-secrets/org.freedesktop.secrets.lys-secrets.service` to
   `~/.local/share/dbus-1/services/`.
+- **Other distributions:** the release's
+  `lys-secrets-<version>-x86_64-linux.tar.gz` holds the static binary, the
+  unit and the activation file. Put the binary at `/usr/bin/lys-secrets`,
+  the unit in `/usr/lib/systemd/user/` (or `~/.config/systemd/user/`), and
+  continue as above.
 
 ## Unlocking
 
@@ -102,6 +110,7 @@ Everything else is `internal/`.
 | `just test` | `go test -shuffle=on ./...` |
 | `just race` | The suite under the race detector |
 | `just build` | Compile-check every package |
+| `just dist` | The release binary in `dist/`, static and stripped |
 | `just fmt` | Format every Go source in place |
 | `just vendor-hash` | Recompute `nix/package.nix`'s `vendorHash` after a go.mod change |
 
@@ -112,7 +121,14 @@ python-secretstorage, Chromium, git's libsecret credential helper).
 `nix flake check` builds the package and evaluates the NixOS and home-manager
 modules.
 
-## CI
+## CI and releases
+
+`.github/workflows/ci.yml` runs `just check` and `nix flake check`, and builds
+the archive, the `.deb` and the `.rpm` the way a release does
+(`package.yml`, with `scripts/ci/` and `packaging/`), so a packaging break
+shows before a tag. Pushing a tag `vX.Y.Z` runs `release.yml`: the same
+packages at that version, their `SHA256SUMS`, and a GitHub release with
+generated notes.
 
 `.github/workflows/security.yml` runs CodeQL (Go and GitHub Actions), Grype and
 govulncheck, uploading findings to code scanning; dependency review gates

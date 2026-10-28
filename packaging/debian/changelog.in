@@ -1,0 +1,5 @@
+lys-secrets (@VERSION@) unstable; urgency=medium
+
+  * Packaged upstream binary release.
+
+ -- @MAINTAINER@  @DATE@

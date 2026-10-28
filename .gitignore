@@ -2,3 +2,7 @@
 /result
 *.test
 /.direnv
+/dist
+/debbuild
+/rpmbuild
+/lys-secrets-*-linux.tar.gz

@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+
+override_dh_dwz:
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable
+
+override_dh_auto_install:
+	install -d debian/lys-secrets/usr/bin
+	install -m 0755 lys-secrets debian/lys-secrets/usr/bin/
+
+	install -d debian/lys-secrets/usr/lib/systemd/user
+	install -m 0644 lys-secrets.service debian/lys-secrets/usr/lib/systemd/user/
+
+	install -d debian/lys-secrets/usr/share/lys-secrets
+	install -m 0644 org.freedesktop.secrets.lys-secrets.service debian/lys-secrets/usr/share/lys-secrets/

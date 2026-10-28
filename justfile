@@ -30,6 +30,11 @@ race:
 build:
     go build -o /dev/null ./...
 
+# Build the release binary into dist/: static and stripped, as the
+# archive and the Debian and RPM packages ship it.
+dist:
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o dist/ ./cmd/lys-secrets
+
 # Format every Go source in place (gofumpt and gci via golangci-lint).
 fmt:
     golangci-lint fmt

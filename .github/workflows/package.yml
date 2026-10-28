@@ -1,0 +1,84 @@
+name: Package
+
+on:
+    workflow_call:
+        inputs:
+            version:
+                description: The package version, without a leading v.
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+jobs:
+    deb:
+        name: Archive + deb
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+              with:
+                  extra_nix_config: |
+                      experimental-features = nix-command flakes
+                      extra-substituters = https://nix.stubbe.dev/c/default/default
+                      extra-trusted-public-keys = default:6uWvXutL9cXjV3lii+Ur5ff+ArQoG4kMBKNXWrIxhHg=
+
+            - name: Build the binary
+              run: nix develop --accept-flake-config -c just dist
+
+            - name: Build the archive
+              env:
+                  VERSION: ${{ inputs.version }}
+              run: ./scripts/ci/build-archive.sh dist "${VERSION}" x86_64
+
+            - name: Build the Debian package
+              env:
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends build-essential debhelper dpkg-dev
+                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" deb
+
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: archive
+                  path: lys-secrets-${{ inputs.version }}-x86_64-linux.tar.gz
+                  if-no-files-found: error
+
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: deb
+                  path: debbuild/DEBS/*/*.deb
+                  if-no-files-found: error
+
+    rpm:
+        name: rpm (Fedora)
+        needs: deb
+        runs-on: ubuntu-latest
+        container:
+            image: fedora:latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  name: archive
+
+            - name: Build the RPM package
+              env:
+                  VERSION: ${{ inputs.version }}
+              run: |
+                  dnf -y --setopt=install_weak_deps=False install rpm-build systemd-rpm-macros
+                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" rpm
+
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: rpm
+                  path: rpmbuild/RPMS/x86_64/*.rpm
+                  if-no-files-found: error
