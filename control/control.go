@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stubbedev/lys-lib/xdg"
 	"golang.org/x/sys/unix"
 )
 
@@ -44,13 +45,15 @@ var (
 	ErrWrongPassword = errors.New("lys-secrets: the password does not unlock the login collection")
 )
 
-// SocketPath is $XDG_RUNTIME_DIR/lys-secrets/control.
+// SocketPath is $XDG_RUNTIME_DIR/lys-secrets/control; an error when
+// XDG_RUNTIME_DIR holds no absolute path, since there is no other place
+// the user's session agrees on.
 func SocketPath() (string, error) {
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if !filepath.IsAbs(dir) {
+	dir, ok := xdg.OS.RuntimeDir("lys-secrets")
+	if !ok {
 		return "", errors.New("XDG_RUNTIME_DIR is not set to an absolute path")
 	}
-	return filepath.Join(dir, "lys-secrets", "control"), nil
+	return filepath.Join(dir, "control"), nil
 }
 
 // Unlocker unlocks the login collection; a wrong password is an error

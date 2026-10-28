@@ -133,3 +133,16 @@ func TestReadPassword(t *testing.T) {
 		}
 	}
 }
+
+func TestSocketPath(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	if got, err := SocketPath(); err != nil || got != "/run/user/1000/lys-secrets/control" {
+		t.Errorf("SocketPath = %q, %v", got, err)
+	}
+	for _, bad := range []string{"", "run/user/1000"} {
+		t.Setenv("XDG_RUNTIME_DIR", bad)
+		if got, err := SocketPath(); err == nil {
+			t.Errorf("XDG_RUNTIME_DIR=%q: SocketPath = %q, want an error", bad, got)
+		}
+	}
+}
