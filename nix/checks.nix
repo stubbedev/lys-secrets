@@ -45,33 +45,37 @@
       then pkgs.runCommand name {} "touch $out"
       else throw "${name} failed";
   in {
-    checks = {
-      # The package installs the binary, the unit and the activation file,
-      # each naming the installed binary.
-      package = pkgs.runCommand "lys-secrets-package" {} ''
-        test -x ${pkg}/bin/lys-secrets
-        grep -qx 'ExecStart=${pkg}/bin/lys-secrets' ${pkg}/lib/systemd/user/lys-secrets.service
-        grep -qx 'Exec=${pkg}/bin/lys-secrets' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service
-        grep -qx 'SystemdService=lys-secrets.service' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service
-        touch $out
-      '';
+    checks =
+      {
+        # The package installs the binary, the unit and the activation file,
+        # each naming the installed binary.
+        package = pkgs.runCommand "lys-secrets-package" {} ''
+          test -x ${pkg}/bin/lys-secrets
+          grep -qx 'ExecStart=${pkg}/bin/lys-secrets' ${pkg}/lib/systemd/user/lys-secrets.service
+          grep -qx 'Exec=${pkg}/bin/lys-secrets' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
+          grep -qx 'SystemdService=lys-secrets.service' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
+          touch $out
+        '';
 
-      # home-manager wires D-Bus activation to the packaged unit and starts
-      # it with the graphical session.
-      hm-module = expect "lys-secrets-hm-module" (
-        home.xdg.dataFile."dbus-1/services/org.freedesktop.secrets.lys-secrets.service".source
-        == "${pkg}/share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service"
-        && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
-        == "${pkg}/lib/systemd/user/lys-secrets.service"
-      );
+        # home-manager wires D-Bus activation to the packaged unit and starts
+        # it with the graphical session.
+        hm-module = expect "lys-secrets-hm-module" (
+          home.xdg.dataFile."dbus-1/services/org.freedesktop.secrets.service".source
+          == "${pkg}/share/dbus-1/services/org.freedesktop.secrets.service"
+          && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
+          == "${pkg}/lib/systemd/user/lys-secrets.service"
+        );
 
-      # NixOS hands the package to D-Bus and systemd and starts the unit
-      # with the graphical session.
-      nixos-module = expect "lys-secrets-nixos-module" (
-        lib.elem pkg nixos.services.dbus.packages
-        && lib.elem pkg nixos.systemd.packages
-        && lib.elem "graphical-session.target" nixos.systemd.user.services.lys-secrets.wantedBy
-      );
-    };
+        # NixOS hands the package to D-Bus and systemd and starts the unit
+        # with the graphical session.
+        nixos-module = expect "lys-secrets-nixos-module" (
+          lib.elem pkg nixos.services.dbus.packages
+          && lib.elem pkg nixos.systemd.packages
+          && lib.elem "graphical-session.target" nixos.systemd.user.services.lys-secrets.wantedBy
+        );
+      }
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        activation-vm = pkgs.callPackage ./tests/activation-vm.nix {inherit self;};
+      };
   };
 }

@@ -5,7 +5,7 @@ self: {
   ...
 }: let
   cfg = config.services.lys-secrets;
-  activation = "dbus-1/services/org.freedesktop.secrets.lys-secrets.service";
+  activation = "dbus-1/services/org.freedesktop.secrets.service";
   unit = "${cfg.package}/lib/systemd/user/lys-secrets.service";
 in {
   options.services.lys-secrets = import ./options.nix self {inherit lib pkgs;};

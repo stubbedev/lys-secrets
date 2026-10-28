@@ -39,8 +39,8 @@
         install -d $out/lib/systemd/user $out/share/dbus-1/services
         substitute resources/lys-secrets.service $out/lib/systemd/user/lys-secrets.service \
           --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
-        substitute resources/org.freedesktop.secrets.lys-secrets.service \
-          $out/share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service \
+        substitute resources/org.freedesktop.secrets.service \
+          $out/share/dbus-1/services/org.freedesktop.secrets.service \
           --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
       '';
 

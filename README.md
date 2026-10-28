@@ -19,7 +19,7 @@ the name from gnome-keyring.
 
 The flake's package installs the binary, the user unit
 (`lib/systemd/user/lys-secrets.service`) and the D-Bus activation file
-(`share/dbus-1/services/org.freedesktop.secrets.lys-secrets.service`); the
+(`share/dbus-1/services/org.freedesktop.secrets.service`); the
 modules wire them up:
 
 - **NixOS:** import `lys-secrets.nixosModules.default` and set
@@ -37,7 +37,7 @@ modules wire them up:
   Installing one enables nothing. Disable gnome-keyring's secrets component,
   then `systemctl --user enable --now lys-secrets`. To have clients start it
   on demand too, copy
-  `/usr/share/lys-secrets/org.freedesktop.secrets.lys-secrets.service` to
+  `/usr/share/lys-secrets/org.freedesktop.secrets.service` to
   `~/.local/share/dbus-1/services/`.
 - **Other distributions:** the release's
   `lys-secrets-<version>-x86_64-linux.tar.gz` holds the static binary, the

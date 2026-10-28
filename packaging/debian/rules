@@ -21,4 +21,4 @@ override_dh_auto_install:
 	install -m 0644 lys-secrets.service debian/lys-secrets/usr/lib/systemd/user/
 
 	install -d debian/lys-secrets/usr/share/lys-secrets
-	install -m 0644 org.freedesktop.secrets.lys-secrets.service debian/lys-secrets/usr/share/lys-secrets/
+	install -m 0644 org.freedesktop.secrets.service debian/lys-secrets/usr/share/lys-secrets/
