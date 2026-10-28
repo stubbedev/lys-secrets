@@ -1,0 +1,4 @@
+/lys-secrets
+/result
+*.test
+/.direnv
