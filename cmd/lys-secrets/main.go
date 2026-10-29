@@ -94,7 +94,7 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 	if !ok {
 		return errors.New("neither XDG_STATE_HOME nor HOME is set")
 	}
-	sock, err := control.SocketPath()
+	sock, err := control.SocketPath(xdg.OS)
 	if err != nil {
 		return err
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	"github.com/stubbedev/lys-lib/sockdir"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+	"github.com/stubbedev/lys-lib/xdg"
 
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/vault"
@@ -139,7 +140,7 @@ func TestLoginPasswordUnlocksAndTheLockScreenRelocks(t *testing.T) {
 	}
 	d = start(t, "")
 	d.waitLog(t, "serving org.freedesktop.secrets")
-	sock, err := control.SocketPath()
+	sock, err := control.SocketPath(xdg.OS)
 	if err != nil {
 		t.Fatal(err)
 	}

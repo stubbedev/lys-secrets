@@ -45,11 +45,12 @@ var (
 	ErrWrongPassword = errors.New("lys-secrets: the password does not unlock the login collection")
 )
 
-// SocketPath is $XDG_RUNTIME_DIR/lys-secrets/control; an error when
-// XDG_RUNTIME_DIR holds no absolute path, since there is no other place
-// the user's session agrees on.
-func SocketPath() (string, error) {
-	dir, ok := xdg.OS.RuntimeDir("lys-secrets")
+// SocketPath is $XDG_RUNTIME_DIR/lys-secrets/control as env resolves
+// it, so a process may find the socket of a session other than its own;
+// an error when XDG_RUNTIME_DIR holds no absolute path, since there is
+// no other place the user's session agrees on.
+func SocketPath(env xdg.Env) (string, error) {
+	dir, ok := env.RuntimeDir("lys-secrets")
 	if !ok {
 		return "", errors.New("XDG_RUNTIME_DIR is not set to an absolute path")
 	}

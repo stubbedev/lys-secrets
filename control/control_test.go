@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stubbedev/lys-lib/sockdir"
+	"github.com/stubbedev/lys-lib/xdg"
 )
 
 type fakeUnlocker struct {
@@ -135,13 +136,19 @@ func TestReadPassword(t *testing.T) {
 }
 
 func TestSocketPath(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-	if got, err := SocketPath(); err != nil || got != "/run/user/1000/lys-secrets/control" {
+	runtimeDir := func(dir string) xdg.Env {
+		return func(key string) string {
+			if key == "XDG_RUNTIME_DIR" {
+				return dir
+			}
+			return ""
+		}
+	}
+	if got, err := SocketPath(runtimeDir("/run/user/1000")); err != nil || got != "/run/user/1000/lys-secrets/control" {
 		t.Errorf("SocketPath = %q, %v", got, err)
 	}
 	for _, bad := range []string{"", "run/user/1000"} {
-		t.Setenv("XDG_RUNTIME_DIR", bad)
-		if got, err := SocketPath(); err == nil {
+		if got, err := SocketPath(runtimeDir(bad)); err == nil {
 			t.Errorf("XDG_RUNTIME_DIR=%q: SocketPath = %q, want an error", bad, got)
 		}
 	}
