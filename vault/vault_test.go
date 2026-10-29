@@ -327,6 +327,19 @@ func TestLifecycle(t *testing.T) {
 	})
 }
 
+// Locking a vault nobody serves finds nothing to lock and starts
+// nothing; another call there fails.
+func TestLockWithoutAVault(t *testing.T) {
+	bus := testBus{t, dbustest.Start(t).Address}
+	c := NewClient(bus.conn())
+	if err := c.Lock(ctx(t)); err != nil {
+		t.Errorf("lock without a vault = %v", err)
+	}
+	if _, err := c.Status(ctx(t)); err == nil {
+		t.Error("a status came from no vault")
+	}
+}
+
 // The network login crosses with its fields; none is false.
 func TestNetworkLogin(t *testing.T) {
 	host := &fakeHost{network: NetworkLogin{Username: "ann", Password: "hunter22", Fields: map[string]string{"pin": "1234"}}}

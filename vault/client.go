@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -95,8 +96,22 @@ func (c *Client) Unlock(ctx context.Context, password string) error {
 	return c.do(ctx, "Unlock", password)
 }
 
-// Lock wipes the vault's keys and plaintext.
-func (c *Client) Lock(ctx context.Context) error { return c.do(ctx, "Lock") }
+// Lock wipes the vault's keys and plaintext. A vault that is not
+// running holds no keys: Lock does not start it, and finds nothing to
+// lock.
+func (c *Client) Lock(ctx context.Context) error {
+	err := c.obj.CallWithContext(ctx, iface+".Lock", dbus.FlagNoAutoStart).Err
+	if de, ok := errors.AsType[dbus.Error](err); ok && (de.Name == errServiceUnknown || de.Name == errNameHasNoOwner) {
+		return nil
+	}
+	return decodeError(err)
+}
+
+// The bus's answers for a name nobody owns.
+const (
+	errServiceUnknown = "org.freedesktop.DBus.Error.ServiceUnknown"
+	errNameHasNoOwner = "org.freedesktop.DBus.Error.NameHasNoOwner"
+)
 
 // Logout locks and forgets the session.
 func (c *Client) Logout(ctx context.Context) error { return c.do(ctx, "Logout") }
