@@ -48,7 +48,7 @@ func reply(status int, body string) http.HandlerFunc {
 }
 
 func testClient(f *fakeServer) *Client {
-	return NewClient(Server{API: f.URL + "/api", Identity: f.URL + "/identity"}, Device{ID: "dev-1", Name: "lys-shell"})
+	return NewClient(Server{API: f.URL + "/api", Identity: f.URL + "/identity"}, Device{ID: "dev-1", Name: "lys-secrets"})
 }
 
 var testNow = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -95,7 +95,7 @@ func TestPasswordLogin(t *testing.T) {
 	form := f.forms[0]
 	for k, want := range map[string]string{
 		"grant_type": "password", "username": "a@b.c", "password": "hash", "scope": "api offline_access",
-		"client_id": "desktop", "deviceType": "8", "deviceIdentifier": "dev-1", "deviceName": "lys-shell",
+		"client_id": "desktop", "deviceType": "8", "deviceIdentifier": "dev-1", "deviceName": "lys-secrets",
 		"twoFactorToken": "123456", "twoFactorProvider": "0", "twoFactorRemember": "0",
 	} {
 		if form.Get(k) != want {

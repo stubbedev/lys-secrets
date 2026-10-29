@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/atomicfile"
-
-	"github.com/stubbedev/lys-shell/internal/feed"
 )
 
 // State is where the vault stands.
@@ -104,12 +102,15 @@ type Service struct {
 	gate      passwordGate
 	lastUse   time.Time
 	status    Status
-	ticks     *feed.Tick
+	// changed runs after every status or vault change, outside the
+	// locks.
+	changed func()
 }
 
 // Open loads the session in dir (created 0700), registering a device id
 // on first use: an account there starts locked, none logged out.
-func Open(dir, deviceName string) (*Service, error) {
+// changed runs after every status or vault change.
+func Open(dir, deviceName string, changed func()) (*Service, error) {
 	if err := os.MkdirAll(dir, privateDirMode); err != nil {
 		return nil, fmt.Errorf("bitwarden: state directory %s: %w", dir, err)
 	}
@@ -117,7 +118,7 @@ func Open(dir, deviceName string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, ticks: feed.NewTick()}
+	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed}
 	sess, err := loadSession(filepath.Join(dir, sessionFile))
 	if err != nil {
 		return nil, err
@@ -200,15 +201,12 @@ func (s *Service) Items() []Item {
 	return append([]Item(nil), s.vault.Items...)
 }
 
-// Subscribe ticks after every status or vault change; stop unregisters.
-func (s *Service) Subscribe() (<-chan struct{}, func()) { return s.ticks.Subscribe() }
-
 // update applies f under the data lock and announces the change.
 func (s *Service) update(f func()) {
 	s.mu.Lock()
 	f()
 	s.mu.Unlock()
-	feed.Notify(s.ticks)
+	s.changed()
 }
 
 // fail records err as the last error and returns it.
@@ -481,7 +479,7 @@ func (s *Service) LockIdle(idle time.Duration) bool {
 	}
 	s.mu.Unlock()
 	if stale {
-		feed.Notify(s.ticks)
+		s.changed()
 	}
 	return stale
 }

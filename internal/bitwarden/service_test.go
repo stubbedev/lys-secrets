@@ -101,6 +101,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// counted is a Service that counts its change announcements.
+type counted struct {
+	*Service
+	changes int
+}
+
+// openService opens the service in dir, failing the test when it cannot.
+func openService(t *testing.T, dir string) *counted {
+	t.Helper()
+	c := &counted{}
+	s, err := Open(dir, "lys-secrets", func() { c.changes++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Service = s
+	return c
+}
+
 func login(a *account) LoginRequest {
 	return LoginRequest{Server: a.server(), Email: "test@bitwarden.com", Password: "asdfasdfasdf"}
 }
@@ -109,7 +127,7 @@ func login(a *account) LoginRequest {
 // survives a reopen.
 func TestOpenRegistersADevice(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, "lys-shell")
+	s, err := Open(dir, "lys-secrets", func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +138,7 @@ func TestOpenRegistersADevice(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("device file %v, %v", info, err)
 	}
-	again, err := Open(dir, "lys-shell")
+	again, err := Open(dir, "lys-secrets", func() {})
 	if err != nil || again.device.ID != s.device.ID || len(s.device.ID) != 36 {
 		t.Errorf("device id %q then %q", s.device.ID, again.device.ID)
 	}
@@ -131,7 +149,7 @@ func TestOpenRegistersADevice(t *testing.T) {
 func TestLoginOpensTheVault(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
-	s, _ := Open(dir, "lys-shell")
+	s := openService(t, dir)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +182,7 @@ func TestLoginOpensTheVault(t *testing.T) {
 // code opens the vault.
 func TestLoginFailuresAndSecondFactor(t *testing.T) {
 	a := newAccount(t)
-	s, _ := Open(t.TempDir(), "lys-shell")
+	s := openService(t, t.TempDir())
 	bad := login(a)
 	bad.Password = "nope"
 	if err := s.Login(context.Background(), bad); !errors.Is(err, ErrInvalidCredentials) || s.Status().State != StateLoggedOut || s.Status().Err == nil {
@@ -188,7 +206,7 @@ func TestLoginFailuresAndSecondFactor(t *testing.T) {
 func TestLockAndUnlock(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
-	s, _ := Open(dir, "lys-shell")
+	s := openService(t, dir)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -197,9 +215,9 @@ func TestLockAndUnlock(t *testing.T) {
 	if s.Status().State != StateLocked || s.Items() != nil || s.kr != nil || len(kr.Orgs) != 0 {
 		t.Errorf("after Lock: status %+v, keyring %v", s.Status(), s.kr)
 	}
-	restarted, err := Open(dir, "lys-shell")
-	if err != nil || restarted.Status().State != StateLocked {
-		t.Fatalf("restart = %+v, %v", restarted.Status(), err)
+	restarted := openService(t, dir)
+	if restarted.Status().State != StateLocked {
+		t.Fatalf("restart = %+v", restarted.Status())
 	}
 	if err := restarted.Unlock(context.Background(), "wrong"); !errors.Is(err, ErrWrongPassword) || restarted.Status().State != StateLocked {
 		t.Errorf("wrong password = %v, status %+v", err, restarted.Status())
@@ -218,7 +236,7 @@ func TestLockAndUnlock(t *testing.T) {
 func TestRevokedRefreshLogsOut(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
-	s, _ := Open(dir, "lys-shell")
+	s := openService(t, dir)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +257,7 @@ func TestRevokedRefreshLogsOut(t *testing.T) {
 // token first; while locked it is an error.
 func TestServiceSync(t *testing.T) {
 	a := newAccount(t)
-	s, _ := Open(t.TempDir(), "lys-shell")
+	s := openService(t, t.TempDir())
 	clock := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return clock }
 	if err := s.Login(context.Background(), login(a)); err != nil {
@@ -269,7 +287,7 @@ func TestServiceSync(t *testing.T) {
 func TestLogout(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
-	s, _ := Open(dir, "lys-shell")
+	s := openService(t, dir)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +297,7 @@ func TestLogout(t *testing.T) {
 	if s.Status().State != StateLoggedOut || s.Items() != nil {
 		t.Errorf("status %+v", s.Status())
 	}
-	if again, _ := Open(dir, "lys-shell"); again.Status().State != StateLoggedOut {
+	if again := openService(t, dir); again.Status().State != StateLoggedOut {
 		t.Error("a reopened service still has the session")
 	}
 }
@@ -288,7 +306,7 @@ func TestLogout(t *testing.T) {
 // Touch restarts the clock; a locked vault has nothing to lock.
 func TestLockIdle(t *testing.T) {
 	a := newAccount(t)
-	s, _ := Open(t.TempDir(), "lys-shell")
+	s := openService(t, t.TempDir())
 	clock := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return clock }
 	if err := s.Login(context.Background(), login(a)); err != nil {
@@ -300,15 +318,12 @@ func TestLockIdle(t *testing.T) {
 	if s.LockIdle(15*time.Minute) || s.Status().State != StateUnlocked {
 		t.Fatalf("locked 14 minutes after a touch: %+v", s.Status())
 	}
-	ticks, stop := s.Subscribe()
-	defer stop()
+	changes := s.changes
 	clock = clock.Add(time.Minute)
 	if !s.LockIdle(15*time.Minute) || s.Status().State != StateLocked || s.Items() != nil {
 		t.Fatalf("still open 15 minutes after a touch: %+v", s.Status())
 	}
-	select {
-	case <-ticks:
-	default:
+	if s.changes == changes {
 		t.Error("an idle lock did not announce itself")
 	}
 	if s.LockIdle(0) {
@@ -320,7 +335,7 @@ func TestLockIdle(t *testing.T) {
 // refuses another; a locked vault verifies nothing.
 func TestVerifyPassword(t *testing.T) {
 	a := newAccount(t)
-	s, _ := Open(t.TempDir(), "lys-shell")
+	s := openService(t, t.TempDir())
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
