@@ -75,3 +75,5 @@ func (p *prompts) Password(context.Context, string, bool) ([]byte, bool, error) 
 }
 
 func (p *prompts) NewPassword(context.Context, string) ([]byte, bool, error) { return p.next() }
+
+func (p *prompts) MasterPassword(context.Context, bool) ([]byte, bool, error) { return p.next() }

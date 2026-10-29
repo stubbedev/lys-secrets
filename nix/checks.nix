@@ -22,7 +22,10 @@
             };
             services.lys-secrets = {
               enable = true;
-              vault.lockAfter = 5;
+              vault = {
+                lockAfter = 5;
+                collectionFolder = "Desk top";
+              };
             };
           }
         ];
@@ -74,7 +77,7 @@
           && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
           == "${pkg}/lib/systemd/user/lys-secrets.service"
           && home.xdg.configFile."systemd/user/lys-secrets.service.d/vault.conf".text
-          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m\n"
+          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m --vault-collection-folder=\"Desk top\"\n"
         );
 
         # NixOS hands the package to D-Bus and systemd and starts the unit

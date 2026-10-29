@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -38,9 +40,9 @@ type daemon struct {
 
 // start runs lys-secrets on the test's private session bus, the login
 // password on an inherited pipe when given.
-func start(t *testing.T, password string) *daemon {
+func start(t *testing.T, password string, args ...string) *daemon {
 	t.Helper()
-	cmd := exec.Command(os.Args[0])
+	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), "LYS_SECRETS_TEST_MAIN=1")
 	if password != "" {
 		r, w, err := os.Pipe()
@@ -188,6 +190,34 @@ func TestAnotherSecretServiceLeavesTheVault(t *testing.T) {
 	_ = d.cmd.Process.Signal(syscall.SIGTERM)
 	if err := d.cmd.Wait(); err != nil {
 		t.Errorf("SIGTERM exit: %v", err)
+	}
+}
+
+// The vault shows as a Secret Service collection only when a folder is
+// named for it.
+func TestTheVaultCollectionIsOptIn(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{{nil, false}, {[]string{"--vault-collection-folder", "Desktop"}, true}} {
+		t.Run(strconv.FormatBool(c.want), func(t *testing.T) {
+			setup(t)
+			d := start(t, "", c.args...)
+			d.waitLog(t, "serving org.freedesktop.secrets")
+			conn, err := dbus.ConnectSessionBus()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			v, err := conn.Object("org.freedesktop.secrets", "/org/freedesktop/secrets").GetProperty("org.freedesktop.Secret.Service.Collections")
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := v.Value().([]dbus.ObjectPath)
+			if got := slices.Contains(paths, "/org/freedesktop/secrets/collection/bitwarden"); got != c.want {
+				t.Errorf("collections %v: vault listed %v, want %v", paths, got, c.want)
+			}
+		})
 	}
 }
 

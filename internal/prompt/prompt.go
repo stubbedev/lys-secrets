@@ -62,3 +62,12 @@ func (d *Dialogs) NewPassword(ctx context.Context, collection string) ([]byte, b
 		Confirm: true,
 	})
 }
+
+// MasterPassword asks for the Bitwarden vault's master password.
+func (d *Dialogs) MasterPassword(ctx context.Context, retry bool) ([]byte, bool, error) {
+	return d.ask(ctx, portaldialogs.PasswordRequest{
+		Title: "Unlock Bitwarden",
+		Body:  "An application wants a password from your Bitwarden vault, which is locked. Enter your master password.",
+		Retry: retry,
+	})
+}

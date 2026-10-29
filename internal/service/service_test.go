@@ -53,6 +53,14 @@ func (f *fakePrompter) NewPassword(_ context.Context, collection string) ([]byte
 	return f.next("new " + collection)
 }
 
+func (f *fakePrompter) MasterPassword(_ context.Context, retry bool) ([]byte, bool, error) {
+	kind := "master"
+	if retry {
+		kind += " retry"
+	}
+	return f.next(kind)
+}
+
 func (f *fakePrompter) script(answers ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

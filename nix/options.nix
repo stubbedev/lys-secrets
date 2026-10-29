@@ -24,6 +24,18 @@ self: {
         copy. 0 keeps it open until locked by hand or with the session.
       '';
     };
+    collectionFolder = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "Desktop";
+      description = ''
+        Show the logins of this Bitwarden folder as the Secret Service's
+        read-only `bitwarden` collection, so libsecret clients find them while
+        the vault is open; a locked vault is a locked collection that unlocks
+        with the master password. Logins behind the master password reprompt
+        are left out. Empty shows no collection.
+      '';
+    };
     syncInterval = lib.mkOption {
       type = lib.types.ints.unsigned;
       default = 30;

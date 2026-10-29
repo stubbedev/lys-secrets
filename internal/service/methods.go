@@ -122,6 +122,7 @@ func (m serviceMethods) SearchItems(attrs map[string]string) ([]dbus.ObjectPath,
 			}
 		}
 	}
+	unlocked = append(unlocked, s.searchVaultLocked(attrs)...)
 	return unlocked, locked, nil
 }
 
@@ -131,7 +132,16 @@ func (m serviceMethods) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, db
 	s.mu.Lock()
 	unlocked := []dbus.ObjectPath{}
 	pending := map[string][]dbus.ObjectPath{}
+	var pendingVault []dbus.ObjectPath
 	for _, p := range objects {
+		if s.isVaultPathLocked(p) {
+			if s.vault.open {
+				unlocked = append(unlocked, p)
+			} else {
+				pendingVault = append(pendingVault, p)
+			}
+			continue
+		}
 		c, _, ok := s.resolveLocked(p)
 		if !ok {
 			continue
@@ -143,7 +153,7 @@ func (m serviceMethods) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, db
 		}
 	}
 	s.mu.Unlock()
-	if len(pending) == 0 {
+	if len(pending) == 0 && len(pendingVault) == 0 {
 		return unlocked, noPrompt, nil
 	}
 	prompt, derr := s.newPrompt(func(ctx context.Context) (bool, dbus.Variant) {
@@ -153,6 +163,12 @@ func (m serviceMethods) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, db
 				return true, dbus.MakeVariant(done)
 			}
 			done = append(done, pending[id]...)
+		}
+		if len(pendingVault) > 0 {
+			if !s.promptVaultUnlock(ctx) {
+				return true, dbus.MakeVariant(done)
+			}
+			done = append(done, pendingVault...)
 		}
 		return false, dbus.MakeVariant(done)
 	})
@@ -201,17 +217,27 @@ func (s *Service) promptUnlock(ctx context.Context, id string) bool {
 	}
 }
 
-// Lock locks the collections of objects.
+// Lock locks the collections of objects, the vault's too.
 func (m serviceMethods) Lock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.ObjectPath, *dbus.Error) {
 	s := m.s
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	locked := []dbus.ObjectPath{}
+	lockVault := false
 	for _, p := range objects {
+		if s.isVaultPathLocked(p) {
+			lockVault = true
+			locked = append(locked, p)
+			continue
+		}
 		if c, _, ok := s.resolveLocked(p); ok {
 			s.lockCollectionLocked(c)
 			locked = append(locked, p)
 		}
+	}
+	vc := s.vault
+	s.mu.Unlock()
+	if lockVault {
+		vc.v.Lock()
 	}
 	return locked, noPrompt, nil
 }
@@ -266,6 +292,17 @@ func (m serviceMethods) GetSecrets(sender dbus.Sender, items []dbus.ObjectPath, 
 	}
 	out := map[dbus.ObjectPath]Secret{}
 	for _, p := range items {
+		if s.isVaultPathLocked(p) && p != collectionPath(VaultID) {
+			if !s.vault.open {
+				continue
+			}
+			secret, derr := s.vaultSecretLocked(p, sessPath, sess)
+			if derr != nil {
+				return nil, derr
+			}
+			out[p] = secret
+			continue
+		}
 		c, id, ok := s.resolveLocked(p)
 		if !ok || id == 0 || c.kr.Locked() {
 			continue

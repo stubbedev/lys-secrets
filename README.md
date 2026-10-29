@@ -86,6 +86,17 @@ wiped when it locks.
   `services.lys-secrets.vault.syncInterval`) syncs the open vault that
   often; `0` syncs only on unlock and when asked.
 
+- `--vault-collection-folder NAME` (`services.lys-secrets.vault.collectionFolder`,
+  default none) shows the logins of that vault folder as the Secret
+  Service's read-only `bitwarden` collection, so libsecret clients
+  (`secret-tool lookup username ada`) find them. A locked vault is a locked
+  collection without items. Unlocking it asks for the master password
+  through the desktop's password dialog. Logins behind the master password
+  reprompt, and logins that are not fully decrypted, are left out. Each item
+  carries `xdg:schema` `dev.stubbe.lys.Bitwarden.Login`, `bitwarden:id`,
+  `name`, and the `username`, `uri` (the first) and `folder` it has; its
+  secret is the password.
+
 Over `dev.stubbe.lys.Vault1` a listing carries names, usernames, URIs and
 which fields an item has, never a secret; a secret leaves one field at a
 time, only to a caller running as your user, and an item behind

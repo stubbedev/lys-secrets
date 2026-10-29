@@ -71,6 +71,9 @@ type Prompter interface {
 	Password(ctx context.Context, collection string, retry bool) (password []byte, ok bool, err error)
 	// NewPassword asks for a new password for a collection, typed twice.
 	NewPassword(ctx context.Context, collection string) (password []byte, ok bool, err error)
+	// MasterPassword asks for the Bitwarden vault's master password;
+	// retry says the previous attempt was wrong.
+	MasterPassword(ctx context.Context, retry bool) (password []byte, ok bool, err error)
 }
 
 // Config is what Start needs.
@@ -80,6 +83,8 @@ type Config struct {
 	KDF      keyring.KDF
 	Prompter Prompter
 	Now      func() time.Time
+	// Vault, when set, is shown as the read-only VaultID collection.
+	Vault Vault
 }
 
 // ErrNameTaken is another Secret Service provider owning the bus name.
@@ -100,6 +105,8 @@ type Service struct {
 	signals  chan *dbus.Signal
 	closed   bool
 	release  func()
+	// vault is the vault collection, nil without a Config.Vault.
+	vault *vaultColl
 }
 
 type collection struct {
@@ -163,6 +170,11 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 	for alias := range s.aliases {
 		if err := s.exportAliasLocked(alias); err != nil {
 			return nil, err
+		}
+	}
+	if cfg.Vault != nil {
+		if err := s.startVaultLocked(cfg.Vault); err != nil {
+			return nil, fmt.Errorf("the vault collection: %w", err)
 		}
 	}
 	if err := s.watchOwners(); err != nil {
@@ -237,12 +249,16 @@ func (s *Service) UnlockLogin(password []byte) error {
 	return nil
 }
 
-// Lock locks every collection.
+// Lock locks every collection, the vault's too.
 func (s *Service) Lock() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, c := range s.colls {
 		s.lockCollectionLocked(c)
+	}
+	vc := s.vault
+	s.mu.Unlock()
+	if vc != nil {
+		vc.v.Lock()
 	}
 }
 
@@ -283,9 +299,13 @@ func (s *Service) resolveLocked(p dbus.ObjectPath) (*collection, uint32, bool) {
 }
 
 func (s *Service) collectionPathsLocked() any {
-	out := make([]dbus.ObjectPath, 0, len(s.colls))
+	out := make([]dbus.ObjectPath, 0, len(s.colls)+1)
 	for _, id := range slices.Sorted(maps.Keys(s.colls)) {
 		out = append(out, collectionPath(id))
+	}
+	if s.vault != nil {
+		out = append(out, collectionPath(VaultID))
+		slices.Sort(out)
 	}
 	return out
 }
