@@ -32,16 +32,17 @@
       # the Secret Service clients of the dev shell.
       doCheck = false;
 
-      # The user unit and the D-Bus activation file, for the modules to
+      # The user unit and the D-Bus activation files, for the modules to
       # wire up. Installing the package alone activates neither, since
       # gnome-keyring's activation file may claim the same name.
       postInstall = ''
         install -d $out/lib/systemd/user $out/share/dbus-1/services
         substitute resources/lys-secrets.service $out/lib/systemd/user/lys-secrets.service \
           --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
-        substitute resources/org.freedesktop.secrets.service \
-          $out/share/dbus-1/services/org.freedesktop.secrets.service \
-          --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
+        for activation in org.freedesktop.secrets dev.stubbe.lys.Vault1; do
+          substitute resources/$activation.service $out/share/dbus-1/services/$activation.service \
+            --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
+        done
       '';
 
       meta = {

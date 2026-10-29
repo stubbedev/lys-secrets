@@ -18,6 +18,7 @@ mkdir -p "${STAGING}"
 cp "${BIN_DIR}/lys-secrets" LICENSE \
 	resources/lys-secrets.service \
 	resources/org.freedesktop.secrets.service \
+	resources/dev.stubbe.lys.Vault1.service \
 	"${STAGING}/"
 tar czf "${STAGING}.tar.gz" "${STAGING}"
 rm -rf "${STAGING}"

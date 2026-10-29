@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=dev.stubbe.lys.Vault1
+Exec=/usr/bin/lys-secrets
+SystemdService=lys-secrets.service

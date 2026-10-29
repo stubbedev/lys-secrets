@@ -20,7 +20,10 @@
               homeDirectory = "/home/u";
               stateVersion = "25.11";
             };
-            services.lys-secrets.enable = true;
+            services.lys-secrets = {
+              enable = true;
+              vault.lockAfter = 5;
+            };
           }
         ];
       }).config;
@@ -54,16 +57,24 @@
           grep -qx 'ExecStart=${pkg}/bin/lys-secrets' ${pkg}/lib/systemd/user/lys-secrets.service
           grep -qx 'Exec=${pkg}/bin/lys-secrets' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
           grep -qx 'SystemdService=lys-secrets.service' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
+          grep -qx 'Exec=${pkg}/bin/lys-secrets' ${pkg}/share/dbus-1/services/dev.stubbe.lys.Vault1.service
+          grep -qx 'SystemdService=lys-secrets.service' ${pkg}/share/dbus-1/services/dev.stubbe.lys.Vault1.service
+          grep -qx 'BusName=dev.stubbe.lys.Vault1' ${pkg}/lib/systemd/user/lys-secrets.service
           touch $out
         '';
 
-        # home-manager wires D-Bus activation to the packaged unit and starts
-        # it with the graphical session.
+        # home-manager wires D-Bus activation of both names to the packaged
+        # unit, starts it with the graphical session, and hands it the vault
+        # policy.
         hm-module = expect "lys-secrets-hm-module" (
           home.xdg.dataFile."dbus-1/services/org.freedesktop.secrets.service".source
           == "${pkg}/share/dbus-1/services/org.freedesktop.secrets.service"
+          && home.xdg.dataFile."dbus-1/services/dev.stubbe.lys.Vault1.service".source
+          == "${pkg}/share/dbus-1/services/dev.stubbe.lys.Vault1.service"
           && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
           == "${pkg}/lib/systemd/user/lys-secrets.service"
+          && home.xdg.configFile."systemd/user/lys-secrets.service.d/vault.conf".text
+          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m\n"
         );
 
         # NixOS hands the package to D-Bus and systemd and starts the unit
@@ -72,6 +83,8 @@
           lib.elem pkg nixos.services.dbus.packages
           && lib.elem pkg nixos.systemd.packages
           && lib.elem "graphical-session.target" nixos.systemd.user.services.lys-secrets.wantedBy
+          && nixos.systemd.user.services.lys-secrets.serviceConfig.ExecStart
+          == ["" "${pkg}/bin/lys-secrets --vault-lock-after=15m --vault-sync-interval=30m"]
         );
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

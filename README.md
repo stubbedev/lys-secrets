@@ -7,6 +7,10 @@ KeePassXC or KWallet for app secrets. libsecret (`secret-tool`), Chromium and
 Electron apps, git's `git-credential-libsecret`, python-secretstorage and the
 portal's per-app secrets for sandboxed apps all keep their secrets in it.
 
+It also holds your Bitwarden vault (`dev.stubbe.lys.Vault1`): lys-shell's
+vault dropdown, launcher mode and NetworkManager secret agent are views over
+it, so the one process holding the vault's keys is this one.
+
 It is a small process of its own, separate from the shell: it links no UI
 and asks for passwords through the desktop's dialogs (lys-lib's
 `dev.stubbe.lys.PortalDialogs1`, served by lys-shell).
@@ -14,13 +18,13 @@ and asks for passwords through the desktop's dialogs (lys-lib's
 ## Enabling it
 
 Only one program can own `org.freedesktop.secrets`. When another provider
-already owns it, `lys-secrets` logs which one and exits, so it never takes
-the name from gnome-keyring.
+already owns it, `lys-secrets` logs which one and serves the vault alone, so
+it never takes the name from gnome-keyring.
 
 The flake's package installs the binary, the user unit
-(`lib/systemd/user/lys-secrets.service`) and the D-Bus activation file
-(`share/dbus-1/services/org.freedesktop.secrets.service`); the
-modules wire them up:
+(`lib/systemd/user/lys-secrets.service`) and the D-Bus activation files
+(`share/dbus-1/services/org.freedesktop.secrets.service` and
+`dev.stubbe.lys.Vault1.service`); the modules wire them up:
 
 - **NixOS:** import `lys-secrets.nixosModules.default` and set
   `services.lys-secrets.enable = true;`. It hands the activation file to
@@ -37,8 +41,8 @@ modules wire them up:
   Installing one enables nothing. Disable gnome-keyring's secrets component,
   then `systemctl --user enable --now lys-secrets`. To have clients start it
   on demand too, copy
-  `/usr/share/lys-secrets/org.freedesktop.secrets.service` to
-  `~/.local/share/dbus-1/services/`.
+  `/usr/share/lys-secrets/org.freedesktop.secrets.service` and
+  `dev.stubbe.lys.Vault1.service` to `~/.local/share/dbus-1/services/`.
 - **Other distributions:** the release's
   `lys-secrets-<version>-x86_64-linux.tar.gz` holds the static binary, the
   unit and the activation file. Put the binary at `/usr/bin/lys-secrets`,
@@ -66,6 +70,29 @@ gnome-keyring instead, as before.
 Changing your login password does not re-encrypt the collection: a
 `ChangeLock` request (for example from Seahorse) asks for the new password.
 
+## The Bitwarden vault
+
+lys-secrets logs in to a Bitwarden account (bitwarden.com, bitwarden.eu, a
+self-hosted server or Vaultwarden) and keeps only the session under
+`$XDG_STATE_HOME/lys-secrets/bitwarden` (mode 0600): the server, the email
+and the refresh token, never the master password, a key or an item. The
+keys and the decrypted items live in memory while the vault is open and are
+wiped when it locks.
+
+- `--vault-lock-after D` (default `15m`; NixOS and home-manager:
+  `services.lys-secrets.vault.lockAfter`, in minutes) locks the vault after
+  it went that long without a copy; `0` keeps it open.
+- `--vault-sync-interval D` (default `30m`;
+  `services.lys-secrets.vault.syncInterval`) syncs the open vault that
+  often; `0` syncs only on unlock and when asked.
+
+Over `dev.stubbe.lys.Vault1` a listing carries names, usernames, URIs and
+which fields an item has, never a secret; a secret leaves one field at a
+time, only to a caller running as your user, and an item behind
+Bitwarden's master password reprompt gives one out only with the master
+password. Verification codes are computed here. The Go package `vault` is
+the contract and its client.
+
 ## Access
 
 Every program running as you on your session bus may read an unlocked
@@ -91,6 +118,8 @@ Existing gnome-keyring keyrings are not imported.
 
 ## Go packages
 
+- `vault`: the Bitwarden vault's D-Bus contract and client (lys-shell's
+  vault widget, launcher mode and network agent).
 - `client`: a Secret Service client (lys-shell's Secret portal keeps the
   per-app master secrets through it).
 - `control`: the unlock socket's client and server (lys-login unlocks the

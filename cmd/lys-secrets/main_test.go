@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -14,8 +15,10 @@ import (
 
 	"github.com/stubbedev/lys-lib/dbustest"
 	"github.com/stubbedev/lys-lib/sockdir"
+	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
 // TestMain lets the test binary be lys-secrets: the tests re-exec it
@@ -96,6 +99,7 @@ func setup(t *testing.T) {
 	dbustest.Session(t)
 	t.Setenv("XDG_RUNTIME_DIR", sockdir.Dir(t))
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 }
 
 func secretTool(t *testing.T, stdin string, args ...string) (string, error) {
@@ -159,6 +163,45 @@ func TestAWrongLoginPasswordLeavesItLocked(t *testing.T) {
 	d.waitLog(t, "serving")
 	if got, _ := secretTool(t, "", "lookup", "app", "a"); got != "" {
 		t.Errorf("lookup = %q while locked", got)
+	}
+}
+
+// Another Secret Service provider (gnome-keyring) keeps its name, and
+// lys-secrets still serves the vault, logged out on a fresh state
+// directory.
+func TestAnotherSecretServiceLeavesTheVault(t *testing.T) {
+	setup(t)
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if reply, err := conn.RequestName("org.freedesktop.secrets", dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
+		t.Fatalf("take the Secret Service name: %v, %v", reply, err)
+	}
+	d := start(t, "")
+	d.waitLog(t, "serving "+vault.ServiceName+" alone")
+	st, err := vault.NewClient(conn).Status(context.Background())
+	if err != nil || st.State != vault.StateLoggedOut {
+		t.Errorf("vault status = %+v, %v", st, err)
+	}
+	_ = d.cmd.Process.Signal(syscall.SIGTERM)
+	if err := d.cmd.Wait(); err != nil {
+		t.Errorf("SIGTERM exit: %v", err)
+	}
+}
+
+// A negative vault policy is a usage error.
+func TestANegativeVaultPolicyIsRefused(t *testing.T) {
+	setup(t)
+	for _, arg := range []string{"--vault-lock-after=-1m", "--vault-sync-interval=-1s"} {
+		cmd := exec.Command(os.Args[0], arg)
+		cmd.Env = append(os.Environ(), "LYS_SECRETS_TEST_MAIN=1")
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), "must not be negative") {
+			t.Errorf("%s: %v, %s", arg, err, out)
+		}
 	}
 }
 
