@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
 // Vectors from Bitwarden's SDK tests (bitwarden-crypto master_key.rs and
@@ -97,11 +99,11 @@ func TestUnlockOpensTheHierarchy(t *testing.T) {
 	}
 }
 
-// A wrong master password is ErrWrongPassword, for the modern wrapping
+// A wrong master password is vault.ErrWrongPassword, for the modern wrapping
 // (its MAC fails) and the legacy one (no MAC: its padding or length).
 func TestWrongPassword(t *testing.T) {
 	_, err := Unlock(UnlockInput{Password: "wrong", Email: "test@bitwarden.com", Kdf: Kdf{Type: KdfPBKDF2, Iterations: 600000}, UserKey: testUserKey})
-	if !errors.Is(err, ErrWrongPassword) {
+	if !errors.Is(err, vault.ErrWrongPassword) {
 		t.Errorf("modern = %v", err)
 	}
 	legacy := "0.8UClLa8IPE1iZT7chy5wzQ==|6PVfHnVk5S3XqEtQemnM5yb4JodxmPkkWzmDRdfyHtjORmvxqlLX40tBJZ+CKxQWmS8tpEB5w39rbgHg/gqs0haGdZG4cPbywsgGzxZ7uNI="
@@ -113,7 +115,7 @@ func TestWrongPassword(t *testing.T) {
 	if !bytes.Equal(kr.User.enc, wantEnc) {
 		t.Errorf("legacy user key enc = %v", kr.User.enc)
 	}
-	if _, err := Unlock(UnlockInput{Password: "nope", Email: "legacy@bitwarden.com", Kdf: Kdf{Type: KdfPBKDF2, Iterations: 600000}, UserKey: legacy}); !errors.Is(err, ErrWrongPassword) {
+	if _, err := Unlock(UnlockInput{Password: "nope", Email: "legacy@bitwarden.com", Kdf: Kdf{Type: KdfPBKDF2, Iterations: 600000}, UserKey: legacy}); !errors.Is(err, vault.ErrWrongPassword) {
 		t.Errorf("legacy wrong password = %v", err)
 	}
 }

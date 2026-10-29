@@ -10,6 +10,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
 // fakeServer serves one handler per path and records the forms and
@@ -48,7 +50,11 @@ func reply(status int, body string) http.HandlerFunc {
 }
 
 func testClient(f *fakeServer) *Client {
-	return NewClient(Server{API: f.URL + "/api", Identity: f.URL + "/identity"}, Device{ID: "dev-1", Name: "lys-secrets"})
+	server, err := vault.ParseServer(f.URL)
+	if err != nil {
+		panic(err)
+	}
+	return NewClient(server, Device{ID: "dev-1", Name: "lys-secrets"})
 }
 
 var testNow = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -85,7 +91,7 @@ func TestPasswordLogin(t *testing.T) {
 	f := newFakeServer(t, map[string]http.HandlerFunc{
 		"/identity/connect/token": reply(200, `{"access_token":"at","refresh_token":"rt","expires_in":3600,"token_type":"Bearer","Key":"2.k","PrivateKey":"2.p"}`),
 	})
-	tok, err := testClient(f).PasswordLogin(context.Background(), "a@b.c", "hash", &TwoFactor{Provider: TwoFactorAuthenticator, Code: "123456"}, "", testNow)
+	tok, err := testClient(f).PasswordLogin(context.Background(), "a@b.c", "hash", &vault.TwoFactor{Provider: vault.TwoFactorAuthenticator, Code: "123456"}, "", testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,11 +126,11 @@ func TestLoginChallenges(t *testing.T) {
 		check  func(error) bool
 	}{
 		{`{"TwoFactorProviders2":{"1":{"Email":"a***@b.c"},"0":null}}`, 400, func(err error) bool {
-			var tf *TwoFactorRequiredError
-			return errors.As(err, &tf) && slices.Equal(tf.Providers, []TwoFactorProvider{TwoFactorAuthenticator, TwoFactorEmail})
+			var tf *vault.TwoFactorRequiredError
+			return errors.As(err, &tf) && slices.Equal(tf.Providers, []vault.TwoFactorProvider{vault.TwoFactorAuthenticator, vault.TwoFactorEmail})
 		}},
-		{`{"ErrorModel":{"Message":"New device verification required"}}`, 400, func(err error) bool { return errors.Is(err, ErrNewDeviceVerification) }},
-		{`{"error":"invalid_grant","ErrorModel":{"Message":"Username or password is incorrect. Try again."}}`, 400, func(err error) bool { return errors.Is(err, ErrInvalidCredentials) }},
+		{`{"ErrorModel":{"Message":"New device verification required"}}`, 400, func(err error) bool { return errors.Is(err, vault.ErrNewDeviceVerification) }},
+		{`{"error":"invalid_grant","ErrorModel":{"Message":"Username or password is incorrect. Try again."}}`, 400, func(err error) bool { return errors.Is(err, vault.ErrInvalidCredentials) }},
 		{`{"error":"slow_down"}`, 429, func(err error) bool {
 			var ae *APIError
 			return errors.As(err, &ae) && ae.Retryable() && ae.Message == "slow_down"
@@ -196,19 +202,15 @@ func TestSync(t *testing.T) {
 	}
 }
 
-// The clouds resolve by name; a self-hosted base URL puts the API and
-// identity under it; anything else is refused.
-func TestParseServer(t *testing.T) {
-	if s, err := ParseServer(CloudEU); err != nil || s.API != "https://api.bitwarden.eu" || s.Identity != "https://identity.bitwarden.eu" {
-		t.Errorf("EU cloud = %+v, %v", s, err)
+// The clouds resolve to their own endpoints; a self-hosted base URL
+// puts the API and identity under it.
+func TestEndpointsOf(t *testing.T) {
+	eu, _ := vault.ParseServer(vault.CloudEU)
+	if e := endpointsOf(eu); e.API != "https://api.bitwarden.eu" || e.Identity != "https://identity.bitwarden.eu" {
+		t.Errorf("EU cloud = %+v", e)
 	}
-	s, err := ParseServer("https://vault.example.com/")
-	if err != nil || s.API != "https://vault.example.com/api" || s.Identity != "https://vault.example.com/identity" {
-		t.Errorf("self-hosted = %+v, %v", s, err)
-	}
-	for _, bad := range []string{"vault.example.com", "ftp://x", "", "https://x/?a=b", "bitwarden.org"} {
-		if _, err := ParseServer(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
+	own, _ := vault.ParseServer("https://vault.example.com/")
+	if e := endpointsOf(own); e.API != "https://vault.example.com/api" || e.Identity != "https://vault.example.com/identity" {
+		t.Errorf("self-hosted = %+v", e)
 	}
 }

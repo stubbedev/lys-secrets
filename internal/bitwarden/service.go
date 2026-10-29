@@ -14,36 +14,15 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/atomicfile"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
-
-// State is where the vault stands.
-type State int
-
-// The vault states: no account, an account whose keys are not in
-// memory, and an open vault.
-const (
-	StateLoggedOut State = iota
-	StateLocked
-	StateUnlocked
-)
-
-// Status is what the shell shows: the state, the account, whether a
-// sync runs, when the last one landed, and the last operation's error
-// (nil once one succeeds).
-type Status struct {
-	State    State
-	Email    string
-	Syncing  bool
-	LastSync time.Time
-	Err      error
-	Items    int
-}
 
 // session is what survives a restart: the server, the account, the
 // refresh token and the client id it was issued to. No key material and
 // no vault data; the KDF comes from a fresh prelogin at every unlock.
 type session struct {
-	Server       Server
+	Server       vault.Server
 	Email        string
 	RefreshToken string
 	ClientID     string
@@ -57,38 +36,13 @@ const (
 	refreshMargin   = time.Minute
 )
 
-// ErrLoginRequired reports a session that can no longer refresh (an API
-// key login, which gets no refresh token, or a token the server
-// revoked): log in again.
-var ErrLoginRequired = errors.New("bitwarden: login required")
-
-// LoginRequest is a password login: the server, the account, the master
-// password, and the second factor or new device code when a previous
-// attempt asked for one.
-type LoginRequest struct {
-	Server       Server
-	Email        string
-	Password     string
-	TwoFactor    *TwoFactor
-	NewDeviceOTP string
-}
-
-// APIKeyRequest is an API key login; the master password still opens
-// the keys.
-type APIKeyRequest struct {
-	Server           Server
-	Email            string
-	ClientID, Secret string
-	Password         string
-}
-
 // Service owns the vault: the session, the keys while unlocked, and the
 // decrypted items. Operations run one at a time; no lock is held across
 // a network call except the operation lock that serializes them.
 type Service struct {
 	dir       string
 	now       func() time.Time
-	newClient func(Server, Device) *Client
+	newClient func(vault.Server, Device) *Client
 	device    Device
 
 	op sync.Mutex
@@ -101,7 +55,7 @@ type Service struct {
 	vault     Vault
 	gate      passwordGate
 	lastUse   time.Time
-	status    Status
+	status    vault.Status
 	// changed runs after every status or vault change, outside the
 	// locks.
 	changed func()
@@ -125,7 +79,7 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	}
 	if sess != nil {
 		s.sess = sess
-		s.status = Status{State: StateLocked, Email: sess.Email}
+		s.status = vault.Status{State: vault.StateLocked, Email: sess.Email}
 	}
 	return s, nil
 }
@@ -181,7 +135,7 @@ func (s *Service) saveSession(sess *session) error {
 }
 
 // Status is the latest status.
-func (s *Service) Status() Status {
+func (s *Service) Status() vault.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.status
@@ -194,11 +148,71 @@ func (s *Service) session() *session {
 	return s.sess
 }
 
-// Items is the open vault's items, nil while locked.
-func (s *Service) Items() []Item {
+// Items lists the open vault, favorites first then by name.
+func (s *Service) Items() ([]vault.Item, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]Item(nil), s.vault.Items...)
+	if s.kr == nil {
+		return nil, vault.ErrLocked
+	}
+	out := make([]vault.Item, len(s.vault.Items))
+	for i, it := range s.vault.Items {
+		out[i] = it.summary()
+	}
+	return out, nil
+}
+
+// Field is item id's field f, a verification code the one current now.
+// A secret of an item behind the master password reprompt needs the
+// master password; otherwise password is ignored. It counts as use.
+func (s *Service) Field(id string, f vault.Field, password string) (vault.Value, error) {
+	s.mu.Lock()
+	it, ok := s.vault.Item(id)
+	open := s.kr != nil
+	s.mu.Unlock()
+	switch {
+	case !open:
+		return vault.Value{}, vault.ErrLocked
+	case !ok:
+		return vault.Value{}, fmt.Errorf("%w: %s", vault.ErrNoSuchItem, id)
+	}
+	if it.Reprompt && f.Secret() {
+		if password == "" {
+			return vault.Value{}, fmt.Errorf("%w: %s", vault.ErrRepromptRequired, it.Name)
+		}
+		if err := s.verifyPassword(password); err != nil {
+			return vault.Value{}, err
+		}
+	}
+	v, err := it.value(f, s.now())
+	if err != nil {
+		return vault.Value{}, err
+	}
+	s.touch()
+	return v, nil
+}
+
+// NetworkLogin is the login answering the network connection named
+// name from folder (networkLogin); none from an empty folder or a
+// vault that is not open.
+func (s *Service) NetworkLogin(folder, name string) (vault.NetworkLogin, bool) {
+	if folder == "" {
+		return vault.NetworkLogin{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kr == nil {
+		return vault.NetworkLogin{}, false
+	}
+	it, ok := networkLogin(s.vault.Items, folder, name)
+	if !ok {
+		return vault.NetworkLogin{}, false
+	}
+	fields := make(map[string]string, len(it.Fields))
+	for _, f := range it.Fields {
+		fields[f.Name] = f.Value
+	}
+	return vault.NetworkLogin{Username: it.Username, Password: it.Password, Fields: fields}, true
 }
 
 // update applies f under the data lock and announces the change.
@@ -218,7 +232,7 @@ func (s *Service) fail(err error) error {
 // Login logs in with the master password and opens the vault. A second
 // factor or a new device's code comes back as TwoFactorRequiredError or
 // ErrNewDeviceVerification: ask for it and call Login again with it.
-func (s *Service) Login(ctx context.Context, req LoginRequest) error {
+func (s *Service) Login(ctx context.Context, req vault.LoginRequest) error {
 	s.op.Lock()
 	defer s.op.Unlock()
 	c := s.newClient(req.Server, s.device)
@@ -244,7 +258,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) error {
 
 // SendLoginEmail asks the server to email the second-factor code for a
 // login that needs it.
-func (s *Service) SendLoginEmail(ctx context.Context, req LoginRequest) error {
+func (s *Service) SendLoginEmail(ctx context.Context, req vault.LoginRequest) error {
 	s.op.Lock()
 	defer s.op.Unlock()
 	c := s.newClient(req.Server, s.device)
@@ -270,7 +284,7 @@ func (s *Service) SendLoginEmail(ctx context.Context, req LoginRequest) error {
 // LoginAPIKey logs in with the personal API key and opens the vault
 // with the master password. The server issues no refresh token for it:
 // once the access token expires, a locked vault needs the key again.
-func (s *Service) LoginAPIKey(ctx context.Context, req APIKeyRequest) error {
+func (s *Service) LoginAPIKey(ctx context.Context, req vault.APIKeyRequest) error {
 	s.op.Lock()
 	defer s.op.Unlock()
 	c := s.newClient(req.Server, s.device)
@@ -292,7 +306,7 @@ func (s *Service) LoginAPIKey(ctx context.Context, req APIKeyRequest) error {
 
 // Unlock opens a locked vault with the master password: a fresh token,
 // a sync, the keys. A wrong password leaves it locked; a session that
-// can no longer refresh logs out with ErrLoginRequired.
+// can no longer refresh logs out with vault.ErrLoginRequired.
 func (s *Service) Unlock(ctx context.Context, password string) error {
 	s.op.Lock()
 	defer s.op.Unlock()
@@ -300,7 +314,7 @@ func (s *Service) Unlock(ctx context.Context, password string) error {
 	sess := s.sess
 	s.mu.Unlock()
 	if sess == nil {
-		return s.fail(ErrLoginRequired)
+		return s.fail(vault.ErrLoginRequired)
 	}
 	c := s.newClient(sess.Server, s.device)
 	tok, err := s.freshToken(ctx, c, sess)
@@ -308,7 +322,7 @@ func (s *Service) Unlock(ctx context.Context, password string) error {
 		return s.fail(err)
 	}
 	if sess = s.session(); sess == nil {
-		return s.fail(ErrLoginRequired)
+		return s.fail(vault.ErrLoginRequired)
 	}
 	pre, err := c.Prelogin(ctx, sess.Email)
 	if err != nil {
@@ -349,7 +363,7 @@ func (s *Service) open(ctx context.Context, c *Client, sess *session, tok Token,
 		s.gate = passwordGate{kdf: pre.Kdf, salt: pre.Salt, userKey: sync.Profile.Key}
 		s.lastUse = now
 		s.access, s.accessExp = tok.AccessToken, tok.Expires
-		s.status = Status{State: StateUnlocked, Email: sess.Email, LastSync: now, Items: len(v.Items)}
+		s.status = vault.Status{State: vault.StateUnlocked, Email: sess.Email, LastSync: now, Items: len(v.Items)}
 	})
 	return nil
 }
@@ -374,11 +388,11 @@ func (s *Service) freshToken(ctx context.Context, c *Client, sess *session) (Tok
 		return Token{AccessToken: access, Expires: exp}, nil
 	}
 	if sess.RefreshToken == "" {
-		return Token{}, errors.Join(ErrLoginRequired, s.logout())
+		return Token{}, errors.Join(vault.ErrLoginRequired, s.logout())
 	}
 	tok, err := c.Refresh(ctx, sess.RefreshToken, sess.ClientID, s.now())
-	if errors.Is(err, ErrInvalidCredentials) {
-		return Token{}, errors.Join(fmt.Errorf("%w: %w", ErrLoginRequired, err), s.logout())
+	if errors.Is(err, vault.ErrInvalidCredentials) {
+		return Token{}, errors.Join(fmt.Errorf("%w: %w", vault.ErrLoginRequired, err), s.logout())
 	}
 	if err != nil {
 		return Token{}, err
@@ -410,7 +424,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	sess, kr := s.sess, s.kr
 	s.mu.Unlock()
 	if kr == nil {
-		return s.fail(errors.New("bitwarden: sync needs an open vault"))
+		return s.fail(fmt.Errorf("bitwarden: sync: %w", vault.ErrLocked))
 	}
 	c := s.newClient(sess.Server, s.device)
 	s.update(func() { s.status.Syncing = true })
@@ -419,7 +433,7 @@ func (s *Service) Sync(ctx context.Context) error {
 		return s.fail(err)
 	}
 	if sess = s.session(); sess == nil {
-		return s.fail(ErrLoginRequired)
+		return s.fail(vault.ErrLoginRequired)
 	}
 	sync, err := c.Sync(ctx, tok.AccessToken)
 	if err != nil {
@@ -446,7 +460,7 @@ func (s *Service) Sync(ctx context.Context) error {
 		s.sess, s.vault = sess, v
 		s.gate.userKey = sync.Profile.Key
 		s.access, s.accessExp = tok.AccessToken, tok.Expires
-		s.status = Status{State: StateUnlocked, Email: sess.Email, LastSync: now, Items: len(v.Items)}
+		s.status = vault.Status{State: vault.StateUnlocked, Email: sess.Email, LastSync: now, Items: len(v.Items)}
 	})
 	return nil
 }
@@ -458,20 +472,20 @@ func (s *Service) Lock() { s.update(s.lockLocked) }
 func (s *Service) lockLocked() {
 	s.wipeLocked()
 	if s.sess != nil {
-		s.status = Status{State: StateLocked, Email: s.sess.Email}
+		s.status = vault.Status{State: vault.StateLocked, Email: s.sess.Email}
 	}
 }
 
-// Touch marks the open vault used now, restarting LockIdle's clock.
-func (s *Service) Touch() {
+// touch marks the open vault used now, restarting lockIdle's clock.
+func (s *Service) touch() {
 	s.mu.Lock()
 	s.lastUse = s.now()
 	s.mu.Unlock()
 }
 
-// LockIdle locks an open vault unused for idle or longer: since it
-// opened, or since the last Touch. It reports whether it locked.
-func (s *Service) LockIdle(idle time.Duration) bool {
+// lockIdle locks an open vault unused for idle or longer: since it
+// opened, or since the last touch. It reports whether it locked.
+func (s *Service) lockIdle(idle time.Duration) bool {
 	s.mu.Lock()
 	stale := s.kr != nil && !s.now().Before(s.lastUse.Add(idle))
 	if stale {
@@ -484,7 +498,7 @@ func (s *Service) LockIdle(idle time.Duration) bool {
 	return stale
 }
 
-// passwordGate is what VerifyPassword checks a master password against:
+// passwordGate is what verifyPassword checks a master password against:
 // the account's KDF and salt and the user key as the server wraps it
 // under the master key. None of it is secret.
 type passwordGate struct {
@@ -492,17 +506,16 @@ type passwordGate struct {
 	salt, userKey string
 }
 
-// VerifyPassword checks the master password against the open vault's
+// verifyPassword checks the master password against the open vault's
 // account, as the master password reprompt does before a protected
-// item's secrets: ErrWrongPassword when it does not open the user key.
-// It derives the key, so it is as slow as an unlock and runs off the
-// UI loop.
-func (s *Service) VerifyPassword(password string) error {
+// item's secrets: vault.ErrWrongPassword when it does not open the user
+// key. It derives the key, so it is as slow as an unlock.
+func (s *Service) verifyPassword(password string) error {
 	s.mu.Lock()
 	gate, open := s.gate, s.kr != nil
 	s.mu.Unlock()
 	if !open {
-		return errors.New("bitwarden: verifying the master password needs an open vault")
+		return fmt.Errorf("bitwarden: verify the master password: %w", vault.ErrLocked)
 	}
 	mk, err := deriveMasterKey(password, gate.salt, gate.kdf)
 	if err != nil {
@@ -514,7 +527,6 @@ func (s *Service) VerifyPassword(password string) error {
 		return err
 	}
 	key.Wipe()
-	s.Touch()
 	return nil
 }
 
@@ -525,7 +537,7 @@ func (s *Service) logout() error {
 	s.update(func() {
 		s.wipeLocked()
 		s.sess = nil
-		s.status = Status{State: StateLoggedOut}
+		s.status = vault.Status{State: vault.StateLoggedOut}
 	})
 	err := os.Remove(filepath.Join(s.dir, sessionFile))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

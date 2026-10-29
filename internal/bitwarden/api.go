@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,38 +12,28 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
-// Server is where an account lives: its API and identity endpoints.
-type Server struct {
+// endpoints are a server's API and identity URLs.
+type endpoints struct {
 	API, Identity string
 }
 
-// The official clouds, by the names ParseServer takes.
-const (
-	CloudUS = "bitwarden.com"
-	CloudEU = "bitwarden.eu"
-)
-
-var clouds = map[string]Server{
-	CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com"},
-	CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu"},
+var clouds = map[string]endpoints{
+	vault.CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com"},
+	vault.CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu"},
 }
 
-// ParseServer resolves where an account lives: an official cloud by
-// its name, or a self-hosted server (or Vaultwarden) by its http(s)
-// base URL, its API under /api and its identity server under
-// /identity.
-func ParseServer(s string) (Server, error) {
-	if cloud, ok := clouds[s]; ok {
-		return cloud, nil
+// endpointsOf resolves where server's account lives: an official cloud
+// by its name, a self-hosted server's API under /api and its identity
+// server under /identity.
+func endpointsOf(server vault.Server) endpoints {
+	if cloud, ok := clouds[server.String()]; ok {
+		return cloud
 	}
-	u, err := url.Parse(strings.TrimRight(s, "/"))
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-		return Server{}, fmt.Errorf("bitwarden: server %q is neither %s, %s nor an http(s) base URL", s, CloudUS, CloudEU)
-	}
-	b := u.String()
-	return Server{API: b + "/api", Identity: b + "/identity"}, nil
+	return endpoints{API: server.String() + "/api", Identity: server.String() + "/identity"}
 }
 
 // Device is how this client registers with the server: its stable
@@ -76,61 +65,31 @@ const (
 // Client talks to one server as one device. Every request carries the
 // caller's context and a timeout.
 type Client struct {
-	server Server
+	server endpoints
 	device Device
 	http   *http.Client
 }
 
 // NewClient is a client for server as device.
-func NewClient(server Server, device Device) *Client {
-	return &Client{server: server, device: device, http: &http.Client{Timeout: httpTimeout}}
+func NewClient(server vault.Server, device Device) *Client {
+	return &Client{server: endpointsOf(server), device: device, http: &http.Client{Timeout: httpTimeout}}
 }
 
-// APIError is a server answer the flow does not handle: its status and
-// the server's message.
+// APIError is a server answer the flow does not handle: the operation
+// and the server's status and message.
 type APIError struct {
-	Op      string
-	Status  int
-	Message string
+	Op string
+	vault.ServerError
 }
 
-func (e *APIError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("bitwarden: %s: HTTP %d", e.Op, e.Status)
-	}
-	return fmt.Sprintf("bitwarden: %s: HTTP %d: %s", e.Op, e.Status, e.Message)
+func (e *APIError) Error() string { return "bitwarden: " + e.Op + ": " + e.ServerError.Error() }
+
+// Unwrap is the server's answer, as the vault contract reports it.
+func (e *APIError) Unwrap() error { return &e.ServerError }
+
+func apiError(op string, status int, message string) *APIError {
+	return &APIError{Op: op, Status: status, Message: message}
 }
-
-// Retryable reports a rate limit or a server-side failure, worth trying
-// again later; a client error is not.
-func (e *APIError) Retryable() bool {
-	return e.Status == http.StatusTooManyRequests || e.Status >= http.StatusInternalServerError
-}
-
-// TwoFactorProvider is a second factor the server offers.
-type TwoFactorProvider int
-
-// The providers this client completes; the server may list others
-// (Duo, WebAuthn, YubiKey) that the API key login gets around.
-const (
-	TwoFactorAuthenticator TwoFactorProvider = 0
-	TwoFactorEmail         TwoFactorProvider = 1
-)
-
-// TwoFactorRequiredError asks for a second factor: the providers the
-// account has.
-type TwoFactorRequiredError struct{ Providers []TwoFactorProvider }
-
-func (e *TwoFactorRequiredError) Error() string {
-	return fmt.Sprintf("bitwarden: two-factor authentication required (providers %v)", e.Providers)
-}
-
-// ErrNewDeviceVerification asks for the code the server emailed for a
-// login from a device it has not seen.
-var ErrNewDeviceVerification = errors.New("bitwarden: new device verification required")
-
-// ErrInvalidCredentials reports a login the server refused.
-var ErrInvalidCredentials = errors.New("bitwarden: invalid credentials")
 
 // Prelogin is an account's key derivation and its master-password salt.
 type Prelogin struct {
@@ -196,16 +155,10 @@ type Token struct {
 	PrivateKey   string
 }
 
-// TwoFactor is a second factor answering a TwoFactorRequiredError.
-type TwoFactor struct {
-	Provider TwoFactorProvider
-	Code     string
-}
-
 // PasswordLogin exchanges the master password hash for tokens. A second
 // factor or a new device's emailed code, when the server asks, comes as
 // TwoFactorRequiredError or ErrNewDeviceVerification; retry with it.
-func (c *Client) PasswordLogin(ctx context.Context, email, passwordHash string, tf *TwoFactor, newDeviceOTP string, now time.Time) (Token, error) {
+func (c *Client) PasswordLogin(ctx context.Context, email, passwordHash string, tf *vault.TwoFactor, newDeviceOTP string, now time.Time) (Token, error) {
 	form := c.tokenForm()
 	form.Set("grant_type", "password")
 	form.Set("username", email)
@@ -301,20 +254,20 @@ func (c *Client) token(ctx context.Context, op string, form url.Values, authEmai
 			Key:     body.Key, PrivateKey: body.PrivateKey,
 		}, nil
 	case status == http.StatusBadRequest && len(body.TwoFactorProviders2) > 0:
-		e := &TwoFactorRequiredError{}
+		e := &vault.TwoFactorRequiredError{}
 		for k := range body.TwoFactorProviders2 {
-			if p, err := strconv.Atoi(k); err == nil {
-				e.Providers = append(e.Providers, TwoFactorProvider(p))
+			if p, err := strconv.ParseUint(k, 10, 32); err == nil {
+				e.Providers = append(e.Providers, vault.TwoFactorProvider(p))
 			}
 		}
 		slices.Sort(e.Providers)
 		return Token{}, e
 	case status == http.StatusBadRequest && strings.EqualFold(body.ErrorModel.Message, newDeviceMessage):
-		return Token{}, ErrNewDeviceVerification
+		return Token{}, vault.ErrNewDeviceVerification
 	case status == http.StatusBadRequest && body.Error == "invalid_grant":
-		return Token{}, fmt.Errorf("%w: %s", ErrInvalidCredentials, firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription))
+		return Token{}, fmt.Errorf("%w: %s", vault.ErrInvalidCredentials, firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription))
 	default:
-		return Token{}, &APIError{Op: op, Status: status, Message: firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription, body.Error)}
+		return Token{}, apiError(op, status, firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription, body.Error))
 	}
 }
 
@@ -354,7 +307,7 @@ func (c *Client) Sync(ctx context.Context, accessToken string) (SyncResponse, er
 		return SyncResponse{}, err
 	}
 	if status != http.StatusOK {
-		return SyncResponse{}, &APIError{Op: "sync", Status: status, Message: errorMessage(raw)}
+		return SyncResponse{}, apiError("sync", status, errorMessage(raw))
 	}
 	var s SyncResponse
 	if err := json.Unmarshal(raw, &s); err != nil {
@@ -379,7 +332,7 @@ func (c *Client) postJSON(ctx context.Context, op, endpoint string, body []byte,
 		return 0, err
 	}
 	if status != http.StatusOK {
-		return status, &APIError{Op: op, Status: status, Message: errorMessage(raw)}
+		return status, apiError(op, status, errorMessage(raw))
 	}
 	if out == nil {
 		return status, nil
@@ -393,7 +346,7 @@ func (c *Client) postJSON(ctx context.Context, op, endpoint string, body []byte,
 func (c *Client) do(req *http.Request, op string) (int, []byte, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("bitwarden: %s: %w", op, err)
+		return 0, nil, fmt.Errorf("bitwarden: %s: %w: %w", op, vault.ErrUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))

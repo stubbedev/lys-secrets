@@ -1,8 +1,8 @@
 // Package bitwarden is an in-process Bitwarden client: the key
 // hierarchy (master key, user key, RSA private key, organization keys),
 // the EncString envelope, TOTP codes, and the identity and sync API, so
-// the shell reads a vault with no external daemon and wipes its keys on
-// lock.
+// lys-secrets reads a vault with no external daemon and wipes its keys
+// on lock. Its Service is the vault package's Host.
 package bitwarden
 
 import (
@@ -25,6 +25,8 @@ import (
 
 	"github.com/stubbedev/lys-lib/intconv"
 	"golang.org/x/crypto/argon2"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
 // KdfType names the master-password key derivation.
@@ -355,13 +357,9 @@ type UnlockInput struct {
 	OrgKeys         map[string]string
 }
 
-// ErrWrongPassword reports a master password that does not open the
-// user key.
-var ErrWrongPassword = errors.New("bitwarden: wrong master password")
-
 // Unlock derives the master key and opens the key hierarchy. A user key
-// that does not verify is ErrWrongPassword; any other key that does not
-// open is an error naming it.
+// that does not verify is vault.ErrWrongPassword; any other key that
+// does not open is an error naming it.
 func Unlock(in UnlockInput) (*Keyring, error) {
 	mk, err := deriveMasterKey(in.Password, in.Email, in.Kdf)
 	if err != nil {
@@ -462,20 +460,20 @@ func unwrapUserKey(mk *masterKey, wrapped string) (SymmetricKey, error) {
 	defer key.Wipe()
 	raw, err := key.Decrypt(e)
 	if errors.Is(err, ErrMAC) {
-		return SymmetricKey{}, ErrWrongPassword
+		return SymmetricKey{}, vault.ErrWrongPassword
 	}
 	if err != nil {
 		// A legacy wrapping has no MAC: a wrong password shows as bad
 		// padding or a key of the wrong length.
 		if e.Type == EncAesCbc256B64 {
-			return SymmetricKey{}, ErrWrongPassword
+			return SymmetricKey{}, vault.ErrWrongPassword
 		}
 		return SymmetricKey{}, fmt.Errorf("bitwarden: user key: %w", err)
 	}
 	defer wipe(raw)
 	uk, err := symmetricKeyFrom(raw)
 	if err != nil && e.Type == EncAesCbc256B64 {
-		return SymmetricKey{}, ErrWrongPassword
+		return SymmetricKey{}, vault.ErrWrongPassword
 	}
 	return uk, err
 }

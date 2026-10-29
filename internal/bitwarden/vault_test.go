@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"slices"
 	"testing"
+
+	"github.com/stubbedev/lys-secrets/vault"
 )
 
 // seal encrypts plain as a type 2 EncString under key, as Bitwarden's
@@ -48,11 +50,11 @@ func TestDecryptVault(t *testing.T) {
 	sync := SyncResponse{
 		Folders: []SyncFolder{{ID: "f1", Name: s(user, "Work")}},
 		Ciphers: []SyncCipher{
-			{ID: "c1", Type: ItemLogin, FolderID: "f1", Name: s(user, "zeta mail"), Login: &SyncLogin{Username: s(user, "ada"), Password: s(user, "hunter2"), Totp: s(user, "JBSWY3DPEHPK3PXP"), Uris: []struct{ URI string }{{URI: s(user, "https://mail.example.com")}}}},
-			{ID: "c2", Type: ItemLogin, OrganizationID: "o1", Favorite: true, Name: s(org, "Shared VPN"), Login: &SyncLogin{Password: s(org, "s3cret")}},
-			{ID: "c3", Type: ItemSecureNote, Key: s(user, string(bytes.Repeat([]byte{3}, 64))), Name: s(item, "alpha note"), Notes: s(item, "body")},
-			{ID: "c4", Type: ItemLogin, DeletedDate: &deleted, Name: s(user, "gone")},
-			{ID: "c5", Type: ItemCard, Name: s(user, "Visa"), Card: &SyncCard{Number: s(user, "4111111111111111"), Code: s(user, "123")}, Fields: []SyncField{{Name: s(user, "pin"), Value: s(user, "0000"), Type: 1}}},
+			{ID: "c1", Type: vault.ItemLogin, FolderID: "f1", Name: s(user, "zeta mail"), Login: &SyncLogin{Username: s(user, "ada"), Password: s(user, "hunter2"), Totp: s(user, "JBSWY3DPEHPK3PXP"), Uris: []struct{ URI string }{{URI: s(user, "https://mail.example.com")}}}},
+			{ID: "c2", Type: vault.ItemLogin, OrganizationID: "o1", Favorite: true, Name: s(org, "Shared VPN"), Login: &SyncLogin{Password: s(org, "s3cret")}},
+			{ID: "c3", Type: vault.ItemSecureNote, Key: s(user, string(bytes.Repeat([]byte{3}, 64))), Name: s(item, "alpha note"), Notes: s(item, "body")},
+			{ID: "c4", Type: vault.ItemLogin, DeletedDate: &deleted, Name: s(user, "gone")},
+			{ID: "c5", Type: vault.ItemCard, Name: s(user, "Visa"), Card: &SyncCard{Number: s(user, "4111111111111111"), Code: s(user, "123")}, Fields: []SyncField{{Name: s(user, "pin"), Value: s(user, "0000"), Type: 1}}},
 		},
 	}
 	v := DecryptVault(kr, sync)
@@ -89,9 +91,9 @@ func TestUndecryptableItems(t *testing.T) {
 	user, other := testKey(1), testKey(9)
 	kr := &Keyring{User: user, Orgs: map[string]SymmetricKey{}}
 	v := DecryptVault(kr, SyncResponse{Ciphers: []SyncCipher{
-		{ID: "ok", Type: ItemLogin, Name: seal(t, user, []byte("fine")), Login: &SyncLogin{Password: seal(t, other, []byte("x"))}},
-		{ID: "orphan", Type: ItemLogin, OrganizationID: "missing", Name: seal(t, user, []byte("n"))},
-		{ID: "garbled", Type: ItemLogin, Name: "9.what"},
+		{ID: "ok", Type: vault.ItemLogin, Name: seal(t, user, []byte("fine")), Login: &SyncLogin{Password: seal(t, other, []byte("x"))}},
+		{ID: "orphan", Type: vault.ItemLogin, OrganizationID: "missing", Name: seal(t, user, []byte("n"))},
+		{ID: "garbled", Type: vault.ItemLogin, Name: "9.what"},
 	}})
 	if len(v.Items) != 3 {
 		t.Fatalf("items = %d, want all three kept", len(v.Items))
@@ -108,37 +110,26 @@ func TestUndecryptableItems(t *testing.T) {
 	}
 }
 
-// Search matches every word against the name, username, URIs and
-// folder, ignoring case.
-func TestItemMatch(t *testing.T) {
-	it := Item{Name: "Mail", Username: "ada@example.com", URIs: []string{"https://mail.example.com"}, Folder: "Work"}
-	for q, want := range map[string]bool{"": true, "mail": true, "MAIL work": true, "ada example": true, "bank": false, "mail bank": false} {
-		if got := it.Match(q); got != want {
-			t.Errorf("Match(%q) = %v", q, got)
-		}
-	}
-}
-
 func TestNetworkLogin(t *testing.T) {
-	home := Item{ID: "1", Type: ItemLogin, Folder: "Networks", Name: "Home Wi-Fi", Password: "hunter22"}
+	home := Item{ID: "1", Type: vault.ItemLogin, Folder: "Networks", Name: "Home Wi-Fi", Password: "hunter22"}
 	items := []Item{
 		home,
-		{ID: "2", Type: ItemLogin, Folder: "Personal", Name: "Office"},
-		{ID: "3", Type: ItemSecureNote, Folder: "Networks", Name: "Office"},
-		{ID: "4", Type: ItemLogin, Folder: "Networks", Name: "Twice"},
-		{ID: "5", Type: ItemLogin, Folder: "Networks", Name: "Twice"},
-		{ID: "6", Type: ItemLogin, Folder: "Networks", Name: "Guarded", Reprompt: true},
-		{ID: "7", Type: ItemLogin, Folder: "Networks", Name: "Broken", Undecryptable: true},
+		{ID: "2", Type: vault.ItemLogin, Folder: "Personal", Name: "Office"},
+		{ID: "3", Type: vault.ItemSecureNote, Folder: "Networks", Name: "Office"},
+		{ID: "4", Type: vault.ItemLogin, Folder: "Networks", Name: "Twice"},
+		{ID: "5", Type: vault.ItemLogin, Folder: "Networks", Name: "Twice"},
+		{ID: "6", Type: vault.ItemLogin, Folder: "Networks", Name: "Guarded", Reprompt: true},
+		{ID: "7", Type: vault.ItemLogin, Folder: "Networks", Name: "Broken", Undecryptable: true},
 	}
-	if got, ok := NetworkLogin(items, "Networks", "Home Wi-Fi"); !ok || got.ID != "1" {
+	if got, ok := networkLogin(items, "Networks", "Home Wi-Fi"); !ok || got.ID != "1" {
 		t.Errorf("the one login named like the connection: %+v %v", got, ok)
 	}
 	for _, name := range []string{"home wi-fi", "Office", "Twice", "Guarded", "Broken", "Absent"} {
-		if got, ok := NetworkLogin(items, "Networks", name); ok {
+		if got, ok := networkLogin(items, "Networks", name); ok {
 			t.Errorf("%q answered with %+v: not the one exact, unprotected login in the folder", name, got)
 		}
 	}
-	if _, ok := NetworkLogin(items, "Personal", "Home Wi-Fi"); ok {
+	if _, ok := networkLogin(items, "Personal", "Home Wi-Fi"); ok {
 		t.Error("a login outside the folder answered")
 	}
 }
