@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 	"github.com/stubbedev/lys-lib/xdg"
 	"golang.org/x/sys/unix"
@@ -113,7 +114,7 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 			svc.VaultChanged()
 		}
 	})
-	if errors.Is(err, vault.ErrNameTaken) {
+	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string
 		_ = conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, vault.ServiceName).Store(&owner)
 		log.Printf("lys-secrets: %s is already served by %s; staying off", vault.ServiceName, owner)
@@ -130,7 +131,7 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 		cfg.Vault = vaultCollection{bw: bw, folder: collectionFolder}
 	}
 	svc, err := service.Start(conn, cfg)
-	if errors.Is(err, service.ErrNameTaken) {
+	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string
 		_ = conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, service.BusName).Store(&owner)
 		log.Printf("lys-secrets: %s is already served by %s; serving %s alone", service.BusName, owner, vault.ServiceName)

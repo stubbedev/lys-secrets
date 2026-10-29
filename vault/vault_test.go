@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbustest"
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 )
 
@@ -428,9 +429,14 @@ func TestWatch(t *testing.T) {
 // A second daemon on the same bus finds the name taken and leaves
 // nothing exported.
 func TestExportRefusesATakenName(t *testing.T) {
-	_, _, _, bus := serveOn(t, &fakeHost{})
-	if _, err := NewDaemon(context.Background(), &fakeHost{}).Export(bus.conn()); !errors.Is(err, ErrNameTaken) {
+	_, _, other, bus := serveOn(t, &fakeHost{})
+	second := bus.conn()
+	if _, err := NewDaemon(context.Background(), &fakeHost{}).Export(second); !errors.Is(err, dbusx.ErrNameTaken) {
 		t.Errorf("second export = %v", err)
+	}
+	var st wireStatus
+	if err := other.Object(second.Names()[0], ServicePath).Call(iface+".Status", 0).Store(&st); err == nil {
+		t.Errorf("the second daemon still answers Status: %+v", st)
 	}
 }
 

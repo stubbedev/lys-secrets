@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbustest"
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/control"
@@ -312,8 +313,8 @@ func TestStartLeavesAnotherProviderAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Prompter: &fakePrompter{}})
-	if !errors.Is(err, ErrNameTaken) {
-		t.Fatalf("Start = %v, want ErrNameTaken", err)
+	if !errors.Is(err, dbusx.ErrNameTaken) {
+		t.Fatalf("Start = %v, want dbusx.ErrNameTaken", err)
 	}
 	var owner string
 	if err := other.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, BusName).Store(&owner); err != nil || owner != other.Names()[0] {

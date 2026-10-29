@@ -87,9 +87,6 @@ type Config struct {
 	Vault Vault
 }
 
-// ErrNameTaken is another Secret Service provider owning the bus name.
-var ErrNameTaken = errors.New("another Secret Service provider owns " + BusName)
-
 // Service is a running Secret Service.
 type Service struct {
 	conn *dbus.Conn
@@ -123,8 +120,8 @@ type session struct {
 }
 
 // Start loads the collections in cfg.Dir, exports them on conn and takes
-// the bus name. A name another provider holds is ErrNameTaken: the
-// service never queues for it or replaces the owner.
+// the bus name. A name another provider holds is dbusx.ErrNameTaken:
+// the service never queues for it or replaces the owner.
 func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 	s := &Service{
 		conn: conn, cfg: cfg, disk: disk{dir: cfg.Dir},
@@ -180,14 +177,9 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 	if err := s.watchOwners(); err != nil {
 		return nil, err
 	}
-	reply, err := conn.RequestName(BusName, dbus.NameFlagDoNotQueue)
-	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", BusName, err)
+	if s.release, err = dbusx.Own(conn, BusName); err != nil {
+		return nil, err
 	}
-	if reply != dbus.RequestNameReplyPrimaryOwner {
-		return nil, ErrNameTaken
-	}
-	s.release = func() { _, _ = conn.ReleaseName(BusName) }
 	return s, nil
 }
 

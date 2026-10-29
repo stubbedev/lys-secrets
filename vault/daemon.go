@@ -2,7 +2,6 @@ package vault
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -178,33 +177,15 @@ func NewDaemon(life context.Context, host Host) *Daemon {
 	return &Daemon{host: host, life: life, uid: uint32(os.Getuid())} //nolint:gosec // a uid fits 32 bits
 }
 
-// ErrNameTaken is another process serving the vault's name.
-var ErrNameTaken = errors.New("vault: another process owns " + ServiceName)
-
 // Export serves the interface under its name on conn; the returned
-// release drops the name. A name another process owns is ErrNameTaken,
-// and leaves nothing exported.
+// release drops the name. A name another process owns is
+// dbusx.ErrNameTaken, and leaves nothing exported.
 func (d *Daemon) Export(conn *dbus.Conn) (func(), error) {
 	d.conn = conn
-	unexport, err := dbusx.Export(conn, ServicePath, dbusx.Interface{
-		Name: iface, Methods: methods{d}, Signals: []dbusx.SignalDecl{changed, syncFailed},
+	return dbusx.Serve(conn, dbusx.Service{
+		Name: ServiceName, Path: ServicePath, Interface: iface,
+		Methods: methods{d}, Signals: []dbusx.SignalDecl{changed, syncFailed},
 	})
-	if err != nil {
-		return nil, err
-	}
-	reply, err := conn.RequestName(ServiceName, dbus.NameFlagDoNotQueue)
-	if err != nil {
-		unexport()
-		return nil, fmt.Errorf("vault: request %s: %w", ServiceName, err)
-	}
-	if reply != dbus.RequestNameReplyPrimaryOwner {
-		unexport()
-		return nil, ErrNameTaken
-	}
-	return func() {
-		_, _ = conn.ReleaseName(ServiceName)
-		unexport()
-	}, nil
 }
 
 // Changed signals the host's status, after a change of it or of the
