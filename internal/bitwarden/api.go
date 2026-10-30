@@ -20,12 +20,12 @@ import (
 
 // endpoints are a server's API and identity URLs.
 type endpoints struct {
-	API, Identity string
+	API, Identity, Send string
 }
 
 var clouds = map[string]endpoints{
-	vault.CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com"},
-	vault.CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu"},
+	vault.CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com", Send: "https://send.bitwarden.com/#"},
+	vault.CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu", Send: "https://vault.bitwarden.eu/#/send/"},
 }
 
 // endpointsOf resolves where server's account lives: an official cloud
@@ -35,7 +35,7 @@ func endpointsOf(server vault.Server) endpoints {
 	if cloud, ok := clouds[server.String()]; ok {
 		return cloud
 	}
-	return endpoints{API: server.String() + "/api", Identity: server.String() + "/identity"}
+	return endpoints{API: server.String() + "/api", Identity: server.String() + "/identity", Send: server.String() + "/#/send/"}
 }
 
 // Device is how this client registers with the server: its stable
@@ -312,6 +312,28 @@ func (c *Client) CreateCipher(ctx context.Context, accessToken string, req ciphe
 		return SyncCipher{}, errors.New("bitwarden: create a login: the answer has no id")
 	}
 	return created, nil
+}
+
+func (c *Client) CreateSend(ctx context.Context, accessToken string, req sendRequest) (SyncSend, error) {
+	var created SyncSend
+	if err := c.api(ctx, "create a Send", http.MethodPost, "/sends", accessToken, req, &created); err != nil {
+		return SyncSend{}, err
+	}
+	if created.ID == "" || created.AccessID == "" {
+		return SyncSend{}, errors.New("bitwarden: create a Send: the answer has no id or access id")
+	}
+	return created, nil
+}
+
+func (c *Client) DeleteSend(ctx context.Context, accessToken string, id vault.SendID) error {
+	return c.api(ctx, "delete a Send", http.MethodDelete, "/sends/"+url.PathEscape(string(id)), accessToken, nil, nil)
+}
+
+func (c *Client) sendURL(accessID string, material []byte) (string, error) {
+	if accessID == "" || strings.Trim(accessID, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != "" {
+		return "", fmt.Errorf("bitwarden: the Send access id %q is not base64url", accessID)
+	}
+	return c.server.Send + accessID + "/" + base64.RawURLEncoding.EncodeToString(material), nil
 }
 
 func (c *Client) api(ctx context.Context, op, method, path, accessToken string, in, out any) error {

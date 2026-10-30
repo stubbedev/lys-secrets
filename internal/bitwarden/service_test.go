@@ -2,6 +2,7 @@ package bitwarden
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type account struct {
 	itemName   string
 	posted     []map[string]any
 	postStatus int
+	sends      []map[string]any
 }
 
 func newAccount(t *testing.T) *account {
@@ -49,6 +51,8 @@ func newAccount(t *testing.T) *account {
 	})
 	mux.HandleFunc("/identity/connect/token", a.token)
 	mux.HandleFunc("POST /api/ciphers", a.createCipher)
+	mux.HandleFunc("POST /api/sends", a.createSend)
+	mux.HandleFunc("DELETE /api/sends/{id}", a.deleteSend)
 	mux.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer at-") {
 			writeJSON(w, 401, map[string]any{"message": "unauthorized"})
@@ -63,6 +67,7 @@ func newAccount(t *testing.T) *account {
 				"organizations": []any{map[string]any{"id": testOrgID, "key": testOrgKey}},
 			},
 			"ciphers": []any{map[string]any{"id": "c1", "type": 2, "organizationId": testOrgID, "name": name}},
+			"sends":   a.sends,
 		})
 	})
 	a.srv = httptest.NewServer(mux)
@@ -124,6 +129,37 @@ func (a *account) createCipher(w http.ResponseWriter, r *http.Request) {
 	a.posted = append(a.posted, body)
 	body["id"] = fmt.Sprintf("new-%d", len(a.posted))
 	writeJSON(w, 200, body)
+}
+
+func (a *account) createSend(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.t.Error(err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.postStatus != 0 {
+		writeJSON(w, a.postStatus, map[string]any{"message": "You cannot have a Send with a deletion date that far into the future."})
+		return
+	}
+	body["id"] = fmt.Sprintf("s%d", len(a.sends)+1)
+	body["accessId"] = fmt.Sprintf("acc-%d", len(a.sends)+1)
+	body["accessCount"] = 0
+	a.sends = append(a.sends, body)
+	writeJSON(w, 200, body)
+}
+
+func (a *account) deleteSend(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, sd := range a.sends {
+		if sd["id"] == r.PathValue("id") {
+			a.sends = slices.Delete(a.sends, i, i+1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+	writeJSON(w, 404, map[string]any{"message": "Resource not found."})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -615,5 +651,92 @@ func TestCreateLoginRefusals(t *testing.T) {
 	}
 	if _, _, err := s.FindLogin("Home", vault.AnyFolder()); !errors.Is(err, vault.ErrLocked) {
 		t.Errorf("find in a locked vault = %v", err)
+	}
+}
+
+func TestSendsLifecycle(t *testing.T) {
+	a := newAccount(t)
+	s := opened(t, a)
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
+	ctx := context.Background()
+	if sends, err := s.Sends(); err != nil || len(sends) != 0 {
+		t.Fatalf("sends = %+v, %v", sends, err)
+	}
+	deletion := clock.Add(7 * 24 * time.Hour).Truncate(time.Second)
+	changes := s.changes
+	created, err := s.CreateTextSend(ctx, vault.NewTextSend{Name: "Wifi", Text: "hunter22", Deletion: deletion, MaxAccessCount: 2, Password: "pw"})
+	if err != nil || created.ID != "s1" {
+		t.Fatalf("created = %+v, %v", created, err)
+	}
+	prefix := a.srv.URL + "/#/send/acc-1/"
+	if !strings.HasPrefix(created.URL, prefix) {
+		t.Fatalf("URL = %s, want under %s", created.URL, prefix)
+	}
+	material, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(created.URL, prefix))
+	if err != nil || len(material) != sendKeyLen {
+		t.Fatalf("URL key = %v, %v", material, err)
+	}
+	a.mu.Lock()
+	posted := a.sends[0]
+	a.mu.Unlock()
+	key, err := deriveSendKey(material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, err := key.DecryptString(posted["text"].(map[string]any)["text"].(string)); err != nil || text != "hunter22" {
+		t.Errorf("the recipient's view of the text = %q, %v", text, err)
+	}
+	if h, _ := sendPasswordHash("pw", material); posted["password"] != h {
+		t.Errorf("password hash = %v, want %s", posted["password"], h)
+	}
+	sends, err := s.Sends()
+	if err != nil || len(sends) != 1 || sends[0].Name != "Wifi" || !sends[0].HasPassword || sends[0].MaxAccessCount != 2 || !sends[0].Deletion.Equal(deletion) || s.changes == changes {
+		t.Errorf("sends = %+v, %v, %d changes", sends, err, s.changes-changes)
+	}
+	if err := s.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sends, _ := s.Sends(); len(sends) != 1 || sends[0].Name != "Wifi" || sends[0].Undecryptable {
+		t.Errorf("synced sends = %+v", sends)
+	}
+	if err := s.DeleteSend(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if sends, _ := s.Sends(); len(sends) != 0 {
+		t.Errorf("sends after delete = %+v", sends)
+	}
+	if err := s.DeleteSend(ctx, created.ID); !errors.Is(err, vault.ErrNoSuchSend) {
+		t.Errorf("delete twice = %v", err)
+	}
+}
+
+func TestSendRefusals(t *testing.T) {
+	a := newAccount(t)
+	s := opened(t, a)
+	ctx := context.Background()
+	deletion := time.Now().Add(24 * time.Hour)
+	if _, err := s.CreateTextSend(ctx, vault.NewTextSend{Name: "Wifi", Text: "hunter22", Deletion: time.Now()}); !errors.Is(err, vault.ErrInvalidInput) || strings.Contains(err.Error(), "hunter22") {
+		t.Errorf("an expired Send = %v", err)
+	}
+	a.mu.Lock()
+	a.postStatus = 400
+	a.mu.Unlock()
+	var se *vault.ServerError
+	if _, err := s.CreateTextSend(ctx, vault.NewTextSend{Name: "Wifi", Text: "hunter22", Deletion: deletion}); !errors.As(err, &se) || se.Status != 400 || strings.Contains(err.Error(), "hunter22") {
+		t.Errorf("a refusing server = %v", err)
+	}
+	if sends, _ := s.Sends(); len(sends) != 0 {
+		t.Errorf("a refused Send was listed: %+v", sends)
+	}
+	s.Lock()
+	if _, err := s.Sends(); !errors.Is(err, vault.ErrLocked) {
+		t.Errorf("list locked = %v", err)
+	}
+	if _, err := s.CreateTextSend(ctx, vault.NewTextSend{Name: "Wifi", Text: "t", Deletion: deletion}); !errors.Is(err, vault.ErrLocked) {
+		t.Errorf("create locked = %v", err)
+	}
+	if err := s.DeleteSend(ctx, "s1"); !errors.Is(err, vault.ErrLocked) {
+		t.Errorf("delete locked = %v", err)
 	}
 }

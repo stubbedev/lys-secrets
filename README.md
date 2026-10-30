@@ -103,7 +103,10 @@ time, only to a caller running as your user, and an item behind
 Bitwarden's master password reprompt gives one out only with the master
 password. Verification codes are computed here. `CreateLogin` adds a login
 (encrypted here, as Bitwarden's clients do) to a folder by name, and
-`FindLogin` looks one up by its exact name. The Go package `vault` is the
+`FindLogin` looks one up by its exact name. `Sends` lists your Bitwarden
+Sends, `CreateTextSend` creates a text Send (encrypted here with
+Bitwarden's Send key derivation) and returns its share link with the key,
+and `DeleteSend` deletes one. The Go package `vault` is the
 contract and its client.
 
 ## Access

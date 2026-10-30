@@ -32,6 +32,9 @@ type fakeHost struct {
 	created  []NewLogin
 	found    Item
 	findErr  error
+	sends    []Send
+	newSends []NewTextSend
+	deleted  []SendID
 }
 
 // with runs fn under the host's lock: the daemon's calls arrive on
@@ -132,6 +135,29 @@ func (h *fakeHost) FindLogin(name string, scope FolderScope) (Item, bool, error)
 		return Item{}, false, nil
 	}
 	return h.found, true, nil
+}
+
+func (h *fakeHost) Sends() ([]Send, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sends, nil
+}
+
+func (h *fakeHost) CreateTextSend(_ context.Context, s NewTextSend) (CreatedSend, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.newSends = append(h.newSends, s)
+	return CreatedSend{ID: "s-new", URL: "https://send.example/#/send/acc/key"}, nil
+}
+
+func (h *fakeHost) DeleteSend(_ context.Context, id SendID) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if id != "s1" {
+		return fmt.Errorf("bitwarden: %w: %s", ErrNoSuchSend, id)
+	}
+	h.deleted = append(h.deleted, id)
+	return nil
 }
 
 // testBus is a private bus whose connections close with the test.

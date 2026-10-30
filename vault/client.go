@@ -260,3 +260,40 @@ func (c *Client) FindLogin(ctx context.Context, name string, scope FolderScope) 
 	}
 	return it, true, nil
 }
+
+func (c *Client) Sends(ctx context.Context) ([]Send, error) {
+	var raw []wireSend
+	if err := c.call(ctx, "Sends").Store(&raw); err != nil {
+		return nil, decodeError(err)
+	}
+	sends := make([]Send, len(raw))
+	for i, w := range raw {
+		s, err := fromWireSend(w)
+		if err != nil {
+			return nil, fmt.Errorf("vault: Sends: %w", err)
+		}
+		sends[i] = s
+	}
+	return sends, nil
+}
+
+func (c *Client) CreateTextSend(ctx context.Context, s NewTextSend) (CreatedSend, error) {
+	if err := s.Validate(time.Now()); err != nil {
+		return CreatedSend{}, fmt.Errorf("vault: CreateTextSend: %w", err)
+	}
+	var id, link string
+	if err := c.call(ctx, "CreateTextSend", s.Name, s.Text, s.Deletion.Unix(), s.MaxAccessCount, s.Password).Store(&id, &link); err != nil {
+		return CreatedSend{}, decodeError(err)
+	}
+	if id == "" || link == "" {
+		return CreatedSend{}, errors.New("vault: CreateTextSend answered no id or URL")
+	}
+	return CreatedSend{ID: SendID(id), URL: link}, nil
+}
+
+func (c *Client) DeleteSend(ctx context.Context, id SendID) error {
+	if err := id.validate(); err != nil {
+		return fmt.Errorf("vault: DeleteSend: %w", err)
+	}
+	return c.do(ctx, "DeleteSend", string(id))
+}

@@ -3,6 +3,7 @@ package bitwarden
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -18,6 +19,7 @@ type SyncResponse struct {
 	Folders     []SyncFolder
 	Collections []SyncCollection
 	Ciphers     []SyncCipher
+	Sends       []SyncSend
 }
 
 // SyncProfile carries the wrapped keys: the user key under the master
@@ -133,6 +135,7 @@ type Field struct {
 type Vault struct {
 	Items   []Item
 	Folders map[string]string
+	Sends   []vault.Send
 	// byID indexes Items by item id.
 	byID map[string]int
 }
@@ -143,6 +146,8 @@ func (v *Vault) Wipe() {
 	v.Items = nil
 	clear(v.Folders)
 	clear(v.byID)
+	clear(v.Sends)
+	v.Sends = nil
 }
 
 // Item is the item with id, false when the vault has none.
@@ -172,6 +177,10 @@ func DecryptVault(kr *Keyring, s SyncResponse) Vault {
 		v.Items = append(v.Items, decryptCipher(kr, c, v.Folders))
 	}
 	v.index()
+	for _, sd := range s.Sends {
+		v.Sends = append(v.Sends, decryptSend(kr.User, sd))
+	}
+	sortSends(v.Sends)
 	return v
 }
 
@@ -455,4 +464,139 @@ func encryptLogin(key SymmetricKey, folderID string, l vault.NewLogin) (cipherRe
 func uriChecksum(uri string) string {
 	sum := sha256.Sum256([]byte(uri))
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+type SyncSend struct {
+	ID             string
+	AccessID       string
+	Type           vault.SendType
+	Name           string
+	Key            string
+	MaxAccessCount *uint32
+	AccessCount    uint32
+	Password       *string
+	AuthType       *int
+	Disabled       bool
+	DeletionDate   serverTime
+	ExpirationDate *serverTime
+}
+
+const (
+	sendAuthPassword = 1
+	sendAuthNone     = 2
+)
+
+type serverTime struct{ time.Time }
+
+func (t *serverTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("bitwarden: a date %s: %w", b, err)
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		t.Time = parsed
+		return nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02T15:04:05.999999999", s, time.UTC)
+	if err != nil {
+		return fmt.Errorf("bitwarden: a date %q: %w", s, err)
+	}
+	t.Time = parsed
+	return nil
+}
+
+func decryptSend(user SymmetricKey, sd SyncSend) vault.Send {
+	out := vault.Send{
+		ID: vault.SendID(sd.ID), Type: sd.Type, Name: sd.ID, AccessCount: sd.AccessCount, Disabled: sd.Disabled,
+		HasPassword: (sd.Password != nil && *sd.Password != "") || (sd.AuthType != nil && *sd.AuthType == sendAuthPassword),
+		Deletion:    sd.DeletionDate.Time,
+	}
+	if sd.MaxAccessCount != nil {
+		out.MaxAccessCount = *sd.MaxAccessCount
+	}
+	if sd.ExpirationDate != nil {
+		out.Expiration = sd.ExpirationDate.Time
+	}
+	key, err := openSendKey(user, sd.Key)
+	if err != nil {
+		out.Undecryptable = true
+		return out
+	}
+	defer key.Wipe()
+	name, ok := open(key, sd.Name)
+	if !ok {
+		out.Undecryptable = true
+		return out
+	}
+	out.Name = name
+	return out
+}
+
+func openSendKey(user SymmetricKey, wrapped string) (SymmetricKey, error) {
+	e, err := ParseEncString(wrapped)
+	if err != nil {
+		return SymmetricKey{}, fmt.Errorf("bitwarden: Send key: %w", err)
+	}
+	material, err := user.Decrypt(e)
+	if err != nil {
+		return SymmetricKey{}, fmt.Errorf("bitwarden: Send key: %w", err)
+	}
+	defer wipe(material)
+	return deriveSendKey(material)
+}
+
+func sortSends(sends []vault.Send) {
+	slices.SortStableFunc(sends, func(a, b vault.Send) int {
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
+}
+
+type sendRequest struct {
+	Type           vault.SendType `json:"type"`
+	AuthType       int            `json:"authType"`
+	Name           string         `json:"name"`
+	Key            string         `json:"key"`
+	MaxAccessCount *uint32        `json:"maxAccessCount,omitempty"`
+	DeletionDate   string         `json:"deletionDate"`
+	Text           sendText       `json:"text"`
+	Password       string         `json:"password,omitempty"`
+	Disabled       bool           `json:"disabled"`
+	HideEmail      bool           `json:"hideEmail"`
+}
+
+type sendText struct {
+	Text   string `json:"text"`
+	Hidden bool   `json:"hidden"`
+}
+
+func encryptTextSend(user SymmetricKey, material []byte, s vault.NewTextSend) (sendRequest, error) {
+	key, err := deriveSendKey(material)
+	if err != nil {
+		return sendRequest{}, err
+	}
+	defer key.Wipe()
+	wrapped, err := user.Encrypt(material)
+	if err != nil {
+		return sendRequest{}, fmt.Errorf("bitwarden: wrap the Send key: %w", err)
+	}
+	name, errN := key.EncryptString(s.Name)
+	text, errT := key.EncryptString(s.Text)
+	if err := errors.Join(errN, errT); err != nil {
+		return sendRequest{}, fmt.Errorf("bitwarden: encrypt the Send: %w", err)
+	}
+	req := sendRequest{
+		Type: vault.SendText, AuthType: sendAuthNone, Name: name, Key: wrapped.String(),
+		DeletionDate: s.Deletion.UTC().Format(time.RFC3339), Text: sendText{Text: text},
+	}
+	if s.MaxAccessCount != 0 {
+		count := s.MaxAccessCount
+		req.MaxAccessCount = &count
+	}
+	if s.Password != "" {
+		if req.Password, err = sendPasswordHash(s.Password, material); err != nil {
+			return sendRequest{}, err
+		}
+		req.AuthType = sendAuthPassword
+	}
+	return req, nil
 }

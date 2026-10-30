@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -538,6 +540,73 @@ func (s *Service) CreateLogin(ctx context.Context, l vault.NewLogin) (vault.Item
 		s.status.Items = len(s.vault.Items)
 	})
 	return vault.ItemID(created.ID), nil
+}
+
+func (s *Service) Sends() ([]vault.Send, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kr == nil {
+		return nil, vault.ErrLocked
+	}
+	return slices.Clone(s.vault.Sends), nil
+}
+
+func (s *Service) CreateTextSend(ctx context.Context, n vault.NewTextSend) (vault.CreatedSend, error) {
+	if err := n.Validate(s.now()); err != nil {
+		return vault.CreatedSend{}, fmt.Errorf("bitwarden: create a Send: %w", err)
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	a, err := s.authorize(ctx)
+	if err != nil {
+		return vault.CreatedSend{}, fmt.Errorf("bitwarden: create a Send: %w", err)
+	}
+	material := make([]byte, sendKeyLen)
+	if _, err := rand.Read(material); err != nil {
+		return vault.CreatedSend{}, fmt.Errorf("bitwarden: create a Send: %w", err)
+	}
+	defer wipe(material)
+	req, err := sealLocked(s, a.kr, func() (sendRequest, error) { return encryptTextSend(a.kr.User, material, n) })
+	if err != nil {
+		return vault.CreatedSend{}, fmt.Errorf("bitwarden: create a Send: %w", err)
+	}
+	created, err := a.client.CreateSend(ctx, a.tok.AccessToken, req)
+	if err != nil {
+		return vault.CreatedSend{}, err
+	}
+	link, err := a.client.sendURL(created.AccessID, material)
+	if err != nil {
+		return vault.CreatedSend{}, err
+	}
+	s.update(func() {
+		if s.kr != a.kr {
+			return
+		}
+		s.vault.Sends = append(slices.DeleteFunc(s.vault.Sends, func(x vault.Send) bool { return x.ID == vault.SendID(created.ID) }), decryptSend(a.kr.User, created))
+		sortSends(s.vault.Sends)
+	})
+	return vault.CreatedSend{ID: vault.SendID(created.ID), URL: link}, nil
+}
+
+func (s *Service) DeleteSend(ctx context.Context, id vault.SendID) error {
+	s.op.Lock()
+	defer s.op.Unlock()
+	a, err := s.authorize(ctx)
+	if err != nil {
+		return fmt.Errorf("bitwarden: delete a Send: %w", err)
+	}
+	if err := a.client.DeleteSend(ctx, a.tok.AccessToken, id); err != nil {
+		if se, ok := errors.AsType[*APIError](err); ok && se.Status == http.StatusNotFound {
+			return fmt.Errorf("%w: %s", vault.ErrNoSuchSend, id)
+		}
+		return err
+	}
+	s.update(func() {
+		if s.kr == a.kr {
+			s.vault.Sends = slices.DeleteFunc(s.vault.Sends, func(x vault.Send) bool { return x.ID == id })
+		}
+	})
+	return nil
 }
 
 func sealLocked[T any](s *Service, kr *Keyring, seal func() (T, error)) (T, error) {

@@ -27,6 +27,7 @@ var (
 	ErrNoSuchFolder          = errors.New("vault: no such folder")
 	ErrAmbiguous             = errors.New("vault: more than one match")
 	ErrItemExists            = errors.New("vault: a login of that name exists in that folder")
+	ErrNoSuchSend            = errors.New("vault: no such Send")
 )
 
 // TwoFactorRequiredError asks for a second factor: the providers the
@@ -82,6 +83,7 @@ var sentinels = []struct {
 	{errPrefix + "NoSuchFolder", ErrNoSuchFolder},
 	{errPrefix + "Ambiguous", ErrAmbiguous},
 	{errPrefix + "ItemExists", ErrItemExists},
+	{errPrefix + "NoSuchSend", ErrNoSuchSend},
 }
 
 // encodeError is err as the bus carries it: a contract error under its

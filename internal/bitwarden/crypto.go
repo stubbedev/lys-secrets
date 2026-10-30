@@ -67,6 +67,12 @@ const (
 	stretchMacInfo       = "mac"
 	encStringPartSep     = "|"
 	encStringTypeSep     = "."
+	sendKeyLen           = 16
+	sendKeyName          = "send"
+	sendKeyInfo          = "send"
+	sendPasswordRounds   = 100000
+	sendPasswordHashLen  = 32
+	shareableKeySaltPre  = "bitwarden-"
 )
 
 // ErrInsufficientKdf reports KDF parameters under Bitwarden's floors.
@@ -353,6 +359,30 @@ func (k SymmetricKey) encryptIV(plain, iv []byte) (EncString, error) {
 	m.Write(iv)
 	m.Write(data)
 	return EncString{Type: EncAesCbc256HmacSha256B64, IV: append([]byte(nil), iv...), Data: data, MAC: m.Sum(nil)}, nil
+}
+
+func deriveShareableKey(secret []byte, name, info string) (SymmetricKey, error) {
+	b, err := hkdf.Key(sha256.New, secret, []byte(shareableKeySaltPre+name), info, symmetricKeyLen)
+	if err != nil {
+		return SymmetricKey{}, fmt.Errorf("bitwarden: derive the %s key: %w", name, err)
+	}
+	defer wipe(b)
+	return symmetricKeyFrom(b)
+}
+
+func deriveSendKey(material []byte) (SymmetricKey, error) {
+	if len(material) != sendKeyLen {
+		return SymmetricKey{}, fmt.Errorf("bitwarden: a Send key is %d bytes, got %d", sendKeyLen, len(material))
+	}
+	return deriveShareableKey(material, sendKeyName, sendKeyInfo)
+}
+
+func sendPasswordHash(password string, material []byte) (string, error) {
+	h, err := pbkdf2.Key(sha256.New, password, material, sendPasswordRounds, sendPasswordHashLen)
+	if err != nil {
+		return "", fmt.Errorf("bitwarden: hash the Send password: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(h), nil
 }
 
 func aesCBCDecrypt(key, iv, data []byte) ([]byte, error) {

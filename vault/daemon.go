@@ -45,6 +45,9 @@ type Host interface {
 	NetworkLogin(folder, name string) (NetworkLogin, bool)
 	CreateLogin(ctx context.Context, l NewLogin) (ItemID, error)
 	FindLogin(name string, scope FolderScope) (Item, bool, error)
+	Sends() ([]Send, error)
+	CreateTextSend(ctx context.Context, s NewTextSend) (CreatedSend, error)
+	DeleteSend(ctx context.Context, id SendID) error
 }
 
 // wireStatus is a Status on the bus: LastSync in Unix seconds (0 for
@@ -363,4 +366,40 @@ func (m methods) FindLogin(sender dbus.Sender, name string, scoped bool, folder 
 		return false, Item{Fields: []Field{}, URIs: []string{}}, derr
 	}
 	return true, it, nil
+}
+
+func (m methods) Sends(sender dbus.Sender) ([]wireSend, *dbus.Error) {
+	var sends []Send
+	derr := m.run(sender, func() (err error) {
+		sends, err = m.d.host.Sends()
+		return err
+	})
+	out := make([]wireSend, len(sends))
+	for i, s := range sends {
+		out[i] = toWireSend(s)
+	}
+	return out, derr
+}
+
+func (m methods) CreateTextSend(sender dbus.Sender, name, text string, deletion int64, maxAccessCount uint32, password string) (string, string, *dbus.Error) {
+	s := NewTextSend{Name: name, Text: text, Deletion: time.Unix(deletion, 0), MaxAccessCount: maxAccessCount, Password: password}
+	var created CreatedSend
+	derr := m.run(sender, func() error {
+		if err := s.Validate(time.Now()); err != nil {
+			return fmt.Errorf("CreateTextSend: %w", err)
+		}
+		var err error
+		created, err = m.d.host.CreateTextSend(m.d.life, s)
+		return err
+	})
+	return string(created.ID), created.URL, derr
+}
+
+func (m methods) DeleteSend(sender dbus.Sender, id string) *dbus.Error {
+	return m.run(sender, func() error {
+		if err := SendID(id).validate(); err != nil {
+			return fmt.Errorf("DeleteSend: %w", err)
+		}
+		return m.d.host.DeleteSend(m.d.life, SendID(id))
+	})
 }
