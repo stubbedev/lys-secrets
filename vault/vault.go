@@ -13,10 +13,14 @@
 package vault
 
 import (
+	"crypto/aes"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 )
@@ -230,4 +234,77 @@ type APIKeyRequest struct {
 	Email            string
 	ClientID, Secret string
 	Password         string
+}
+
+type ItemID string
+
+type FolderScope struct {
+	folder string
+	scoped bool
+}
+
+func AnyFolder() FolderScope { return FolderScope{} }
+
+func InFolder(name string) FolderScope { return FolderScope{folder: name, scoped: true} }
+
+func (s FolderScope) Folder() (string, bool) { return s.folder, s.scoped }
+
+func (s FolderScope) Contains(folder string) bool { return !s.scoped || s.folder == folder }
+
+type NewLogin struct {
+	Folder   string
+	Name     string
+	Username string
+	Password string
+	URIs     []string
+}
+
+const (
+	maxEncryptedName     = 1000
+	maxEncryptedUsername = 1000
+	maxEncryptedPassword = 5000
+	maxEncryptedURI      = 10000
+)
+
+func (l NewLogin) Validate() error {
+	if err := validName("name", l.Name, maxEncryptedName); err != nil {
+		return err
+	}
+	if !utf8.ValidString(l.Folder) {
+		return fmt.Errorf("%w: the folder is not UTF-8", ErrInvalidInput)
+	}
+	if err := fitsEncrypted("username", l.Username, maxEncryptedUsername); err != nil {
+		return err
+	}
+	if err := fitsEncrypted("password", l.Password, maxEncryptedPassword); err != nil {
+		return err
+	}
+	for i, u := range l.URIs {
+		if err := validName(fmt.Sprintf("URI %d", i), u, maxEncryptedURI); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validName(what, s string, limit int) error {
+	if strings.TrimSpace(s) == "" {
+		return fmt.Errorf("%w: the %s is empty", ErrInvalidInput, what)
+	}
+	return fitsEncrypted(what, s, limit)
+}
+
+func fitsEncrypted(what, s string, limit int) error {
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("%w: the %s is not UTF-8", ErrInvalidInput, what)
+	}
+	if encryptedLen(len(s)) > limit {
+		return fmt.Errorf("%w: the %s of %d bytes encrypts past Bitwarden's limit of %d characters", ErrInvalidInput, what, len(s), limit)
+	}
+	return nil
+}
+
+func encryptedLen(n int) int {
+	b64 := base64.StdEncoding.EncodedLen
+	return len("2.") + b64(aes.BlockSize) + 1 + b64((n/aes.BlockSize+1)*aes.BlockSize) + 1 + b64(sha256.Size)
 }

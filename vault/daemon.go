@@ -43,6 +43,8 @@ type Host interface {
 	// name from folder; false when there is none or the vault is not
 	// open.
 	NetworkLogin(folder, name string) (NetworkLogin, bool)
+	CreateLogin(ctx context.Context, l NewLogin) (ItemID, error)
+	FindLogin(name string, scope FolderScope) (Item, bool, error)
 }
 
 // wireStatus is a Status on the bus: LastSync in Unix seconds (0 for
@@ -326,4 +328,39 @@ func (m methods) NetworkLogin(sender dbus.Sender, folder, name string) (bool, st
 		l.Fields = map[string]string{}
 	}
 	return ok, l.Username, l.Password, l.Fields, nil
+}
+
+func (m methods) CreateLogin(sender dbus.Sender, folder, name, username, password string, uris []string) (string, *dbus.Error) {
+	l := NewLogin{Folder: folder, Name: name, Username: username, Password: password, URIs: uris}
+	var id ItemID
+	derr := m.run(sender, func() (err error) {
+		if err := l.Validate(); err != nil {
+			return fmt.Errorf("CreateLogin: %w", err)
+		}
+		id, err = m.d.host.CreateLogin(m.d.life, l)
+		return err
+	})
+	return string(id), derr
+}
+
+func (m methods) FindLogin(sender dbus.Sender, name string, scoped bool, folder string) (bool, Item, *dbus.Error) {
+	scope := AnyFolder()
+	if scoped {
+		scope = InFolder(folder)
+	}
+	var (
+		it    Item
+		found bool
+	)
+	derr := m.run(sender, func() (err error) {
+		if err := validName("name", name, maxEncryptedName); err != nil {
+			return fmt.Errorf("FindLogin: %w", err)
+		}
+		it, found, err = m.d.host.FindLogin(name, scope)
+		return err
+	})
+	if derr != nil || !found {
+		return false, Item{Fields: []Field{}, URIs: []string{}}, derr
+	}
+	return true, it, nil
 }

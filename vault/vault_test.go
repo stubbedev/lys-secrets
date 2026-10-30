@@ -29,6 +29,9 @@ type fakeHost struct {
 	apiKeys  []APIKeyRequest
 	loginErr error
 	network  NetworkLogin
+	created  []NewLogin
+	found    Item
+	findErr  error
 }
 
 // with runs fn under the host's lock: the daemon's calls arrive on
@@ -106,6 +109,29 @@ func (h *fakeHost) NetworkLogin(folder, name string) (NetworkLogin, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.network, true
+}
+
+func (h *fakeHost) CreateLogin(_ context.Context, l NewLogin) (ItemID, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if l.Name == "Taken" {
+		return "", fmt.Errorf("bitwarden: %w: %q", ErrItemExists, l.Name)
+	}
+	h.created = append(h.created, l)
+	return ItemID(fmt.Sprintf("new-%d", len(h.created))), nil
+}
+
+func (h *fakeHost) FindLogin(name string, scope FolderScope) (Item, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.asked = append(h.asked, fmt.Sprintf("find %s %+v", name, scope))
+	if h.findErr != nil {
+		return Item{}, false, h.findErr
+	}
+	if h.found.Name != name || !scope.Contains(h.found.Folder) {
+		return Item{}, false, nil
+	}
+	return h.found, true, nil
 }
 
 // testBus is a private bus whose connections close with the test.
@@ -477,5 +503,127 @@ func TestFieldSecret(t *testing.T) {
 		if want := f != FieldUsername && f != FieldEmail; f.Secret() != want {
 			t.Errorf("field %d secret = %v", f, f.Secret())
 		}
+	}
+}
+
+func TestCreateLogin(t *testing.T) {
+	host := &fakeHost{}
+	_, c, conn := serve(t, host)
+	want := NewLogin{Folder: "Networks", Name: "Home", Username: "ann", Password: "hunter22", URIs: []string{"nm://home"}}
+	id, err := c.CreateLogin(ctx(t), want)
+	if err != nil || id != "new-1" {
+		t.Fatalf("CreateLogin = %q, %v", id, err)
+	}
+	if id, err := c.CreateLogin(ctx(t), NewLogin{Name: "Bare"}); err != nil || id != "new-2" {
+		t.Errorf("a login without folder, username, password or URI = %q, %v", id, err)
+	}
+	if _, err := c.CreateLogin(ctx(t), NewLogin{Name: "Taken", Password: "hunter22"}); !errors.Is(err, ErrItemExists) || strings.Contains(err.Error(), "hunter22") {
+		t.Errorf("taken = %v", err)
+	}
+	obj := conn.Object(ServiceName, ServicePath)
+	for _, bad := range []NewLogin{
+		{Name: " "},
+		{Name: "x", Password: strings.Repeat("p", 3696)},
+		{Name: strings.Repeat("n", 688)},
+		{Name: "x", URIs: []string{""}},
+	} {
+		if _, err := c.CreateLogin(ctx(t), bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("the client sent %+v: %v", bad, err)
+		}
+		err := decodeError(obj.CallWithContext(ctx(t), iface+".CreateLogin", 0, bad.Folder, bad.Name, bad.Username, bad.Password, append([]string{}, bad.URIs...)).Err)
+		if !errors.Is(err, ErrInvalidInput) || strings.Contains(err.Error(), strings.Repeat("p", 10)) {
+			t.Errorf("the daemon took %+v: %v", bad, err)
+		}
+	}
+	if _, err := c.CreateLogin(ctx(t), NewLogin{Name: "x", Username: "\xff"}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("the client sent a username that is not UTF-8: %v", err)
+	}
+	host.with(func() {
+		if len(host.created) != 2 || !slices.Equal(host.created[0].URIs, want.URIs) || host.created[0].Password != want.Password || host.created[0].Folder != want.Folder || host.created[1].Name != "Bare" {
+			t.Errorf("the host created %+v", host.created)
+		}
+	})
+}
+
+func TestFindLogin(t *testing.T) {
+	host := &fakeHost{found: Item{ID: "c1", Type: ItemLogin, Name: "Home", Folder: "Networks", Fields: []Field{FieldPassword}}}
+	_, c, _ := serve(t, host)
+	it, ok, err := c.FindLogin(ctx(t), "Home", InFolder("Networks"))
+	if err != nil || !ok || it.ID != "c1" || !slices.Equal(it.Fields, []Field{FieldPassword}) {
+		t.Errorf("scoped = %+v %v %v", it, ok, err)
+	}
+	if it, ok, err := c.FindLogin(ctx(t), "Home", AnyFolder()); err != nil || !ok || it.ID != "c1" {
+		t.Errorf("any folder = %+v %v %v", it, ok, err)
+	}
+	if it, ok, err := c.FindLogin(ctx(t), "Home", InFolder("")); err != nil || ok || it.ID != "" {
+		t.Errorf("no folder = %+v %v %v", it, ok, err)
+	}
+	if _, ok, err := c.FindLogin(ctx(t), "Office", AnyFolder()); err != nil || ok {
+		t.Errorf("missing = %v %v", ok, err)
+	}
+	if _, _, err := c.FindLogin(ctx(t), "", AnyFolder()); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("empty name = %v", err)
+	}
+	host.with(func() { host.findErr = fmt.Errorf("bitwarden: %w", ErrLocked) })
+	if _, _, err := c.FindLogin(ctx(t), "Home", AnyFolder()); !errors.Is(err, ErrLocked) {
+		t.Errorf("locked = %v", err)
+	}
+	host.with(func() { host.findErr, host.found.Type = nil, ItemCard })
+	if _, ok, err := c.FindLogin(ctx(t), "Home", AnyFolder()); err == nil || ok {
+		t.Errorf("a card answered as a login = %v %v", ok, err)
+	}
+	host.with(func() {
+		want := []string{
+			"find Home {folder:Networks scoped:true}",
+			"find Home {folder: scoped:false}",
+			"find Home {folder: scoped:true}",
+			"find Office {folder: scoped:false}",
+			"find Home {folder: scoped:false}",
+			"find Home {folder: scoped:false}",
+		}
+		if !slices.Equal(host.asked, want) {
+			t.Errorf("the host was asked %q", host.asked)
+		}
+	})
+}
+
+func TestNewLoginValidate(t *testing.T) {
+	for _, ok := range []NewLogin{
+		{Name: "Home"},
+		{Name: strings.Repeat("n", 687), Username: strings.Repeat("u", 687), Password: strings.Repeat("p", 3695), URIs: []string{strings.Repeat("u", 7439)}},
+	} {
+		if err := ok.Validate(); err != nil {
+			t.Errorf("%d-byte name refused: %v", len(ok.Name), err)
+		}
+	}
+	for what, bad := range map[string]NewLogin{
+		"empty name":     {},
+		"blank name":     {Name: "\t "},
+		"long name":      {Name: strings.Repeat("n", 688)},
+		"long username":  {Name: "x", Username: strings.Repeat("u", 688)},
+		"long password":  {Name: "x", Password: strings.Repeat("p", 3696)},
+		"long URI":       {Name: "x", URIs: []string{strings.Repeat("u", 7440)}},
+		"blank URI":      {Name: "x", URIs: []string{"ok", " "}},
+		"invalid folder": {Name: "x", Folder: "\xff"},
+	} {
+		err := bad.Validate()
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%s: %v", what, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "ppp") {
+			t.Errorf("%s: the error holds the value: %v", what, err)
+		}
+	}
+}
+
+func TestFolderScope(t *testing.T) {
+	if !AnyFolder().Contains("") || !AnyFolder().Contains("Work") {
+		t.Error("AnyFolder excludes a folder")
+	}
+	if !InFolder("").Contains("") || InFolder("").Contains("Work") {
+		t.Error("InFolder(\"\") is not the items without a folder")
+	}
+	if f, scoped := InFolder("Work").Folder(); f != "Work" || !scoped {
+		t.Errorf("InFolder = %q %v", f, scoped)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec // RSA-OAEP-SHA1 is Bitwarden's organization-key wrapping (EncString type 4)
 	"crypto/sha256"
@@ -296,6 +297,62 @@ func (k SymmetricKey) DecryptString(s string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+func (e EncString) String() string {
+	b64 := base64.StdEncoding.EncodeToString
+	parts := []string{}
+	switch e.Type {
+	case EncAesCbc256B64:
+		parts = append(parts, b64(e.IV), b64(e.Data))
+	case EncAesCbc256HmacSha256B64:
+		parts = append(parts, b64(e.IV), b64(e.Data), b64(e.MAC))
+	default:
+		parts = append(parts, b64(e.Data))
+	}
+	return strconv.Itoa(int(e.Type)) + encStringTypeSep + strings.Join(parts, encStringPartSep)
+}
+
+func (k SymmetricKey) Encrypt(plain []byte) (EncString, error) {
+	iv := make([]byte, encStringIVLen)
+	if _, err := rand.Read(iv); err != nil {
+		return EncString{}, fmt.Errorf("bitwarden: EncString IV: %w", err)
+	}
+	return k.encryptIV(plain, iv)
+}
+
+func (k SymmetricKey) EncryptString(s string) (string, error) {
+	e, err := k.Encrypt([]byte(s))
+	if err != nil {
+		return "", err
+	}
+	return e.String(), nil
+}
+
+func (k SymmetricKey) encryptIV(plain, iv []byte) (EncString, error) {
+	if k.mac == nil {
+		return EncString{}, errors.New("bitwarden: refusing to encrypt under a key without a MAC key")
+	}
+	if len(iv) != encStringIVLen {
+		return EncString{}, fmt.Errorf("bitwarden: EncString IV is %d bytes, want %d", len(iv), encStringIVLen)
+	}
+	block, err := aes.NewCipher(k.enc)
+	if err != nil {
+		return EncString{}, fmt.Errorf("bitwarden: AES key: %w", err)
+	}
+	pad := aes.BlockSize - len(plain)%aes.BlockSize
+	padded := make([]byte, len(plain)+pad)
+	copy(padded, plain)
+	for i := len(plain); i < len(padded); i++ {
+		padded[i] = byte(pad)
+	}
+	defer wipe(padded)
+	data := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(data, padded)
+	m := hmac.New(sha256.New, k.mac)
+	m.Write(iv)
+	m.Write(data)
+	return EncString{Type: EncAesCbc256HmacSha256B64, IV: append([]byte(nil), iv...), Data: data, MAC: m.Sum(nil)}, nil
 }
 
 func aesCBCDecrypt(key, iv, data []byte) ([]byte, error) {

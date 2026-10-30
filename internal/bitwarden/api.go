@@ -1,9 +1,11 @@
 package bitwarden
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -294,26 +296,58 @@ func (c *Client) SendLoginEmail(ctx context.Context, email, passwordHash string)
 // Sync fetches the account: its profile with the wrapped keys, folders,
 // collections and ciphers.
 func (c *Client) Sync(ctx context.Context, accessToken string) (SyncResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.server.API+"/sync?excludeDomains=true", nil)
+	var s SyncResponse
+	if err := c.api(ctx, "sync", http.MethodGet, "/sync?excludeDomains=true", accessToken, nil, &s); err != nil {
+		return SyncResponse{}, err
+	}
+	return s, nil
+}
+
+func (c *Client) CreateCipher(ctx context.Context, accessToken string, req cipherRequest) (SyncCipher, error) {
+	var created SyncCipher
+	if err := c.api(ctx, "create a login", http.MethodPost, "/ciphers", accessToken, req, &created); err != nil {
+		return SyncCipher{}, err
+	}
+	if created.ID == "" {
+		return SyncCipher{}, errors.New("bitwarden: create a login: the answer has no id")
+	}
+	return created, nil
+}
+
+func (c *Client) api(ctx context.Context, op, method, path, accessToken string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("bitwarden: %s request: %w", op, err)
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.server.API+path, body)
 	if err != nil {
-		return SyncResponse{}, fmt.Errorf("bitwarden: sync request: %w", err)
+		return fmt.Errorf("bitwarden: %s request: %w", op, err)
+	}
+	if in != nil {
+		req.Header.Set(headerContentType, jsonContentType)
 	}
 	req.Header.Set(headerAuth, "Bearer "+accessToken)
 	req.Header.Set(headerAccept, jsonContentType)
 	req.Header.Set(headerDeviceType, deviceTypeLinux)
 	req.Header.Set(headerClientName, clientID)
-	status, raw, err := c.do(req, "sync")
+	status, raw, err := c.do(req, op)
 	if err != nil {
-		return SyncResponse{}, err
+		return err
 	}
 	if status != http.StatusOK {
-		return SyncResponse{}, apiError("sync", status, errorMessage(raw))
+		return apiError(op, status, errorMessage(raw))
 	}
-	var s SyncResponse
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return SyncResponse{}, fmt.Errorf("bitwarden: sync: unreadable answer: %w", err)
+	if out == nil {
+		return nil
 	}
-	return s, nil
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("bitwarden: %s: unreadable answer: %w", op, err)
+	}
+	return nil
 }
 
 // postJSON posts body and decodes a 200's JSON into out (nil to ignore

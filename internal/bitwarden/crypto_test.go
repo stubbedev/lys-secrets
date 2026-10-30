@@ -179,3 +179,54 @@ func TestArgon2idParametersPastTheirTypesAreRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestEncryptKnownAnswer(t *testing.T) {
+	e, err := testKey(1).encryptIV([]byte("hunter2"), bytes.Repeat([]byte{7}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "2.BwcHBwcHBwcHBwcHBwcHBw==|rtXbFGIp9Q9CASuN95yRmQ==|zAuHC+W95cx2ybHBPIctxyTB72nLEaj0oenj/CRGkjo="
+	if e.String() != want {
+		t.Errorf("EncString = %s, want %s", e, want)
+	}
+	parsed, err := ParseEncString(want)
+	if err != nil || parsed.String() != want {
+		t.Errorf("ParseEncString(%s).String() = %s, %v", want, parsed, err)
+	}
+}
+
+func TestEncryptRoundTrip(t *testing.T) {
+	kr, err := Unlock(UnlockInput{Password: "asdfasdfasdf", Email: "test@bitwarden.com", Kdf: Kdf{Type: KdfPBKDF2, Iterations: 600000}, UserKey: testUserKey, PrivateKey: testPrivateKey, OrgKeys: map[string]string{testOrgID: testOrgKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plain := range []string{"", "a", "exactly sixteen!", strings.Repeat("ü", 300)} {
+		for _, key := range []SymmetricKey{kr.User, kr.Orgs[testOrgID]} {
+			first, err := key.EncryptString(plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, _ := key.EncryptString(plain)
+			if first == second {
+				t.Errorf("two encryptions of %q share an IV", plain)
+			}
+			if got, err := key.DecryptString(first); err != nil || got != plain {
+				t.Errorf("round trip of %q = %q, %v", plain, got, err)
+			}
+		}
+	}
+	if s, err := kr.User.EncryptString("Default collection"); err != nil {
+		t.Fatal(err)
+	} else if _, err := kr.Orgs[testOrgID].DecryptString(s); !errors.Is(err, ErrMAC) {
+		t.Errorf("another key opened it: %v", err)
+	}
+}
+
+func TestEncryptRefusesALegacyKey(t *testing.T) {
+	if _, err := (SymmetricKey{enc: make([]byte, 32)}).Encrypt([]byte("x")); err == nil {
+		t.Error("encrypted without a MAC key")
+	}
+	if _, err := testKey(1).encryptIV([]byte("x"), make([]byte, 8)); err == nil {
+		t.Error("encrypted with a short IV")
+	}
+}

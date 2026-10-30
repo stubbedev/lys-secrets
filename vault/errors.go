@@ -23,6 +23,10 @@ var (
 	ErrRepromptRequired      = errors.New("vault: the item asks for the master password")
 	ErrUnreachable           = errors.New("vault: the server is unreachable")
 	ErrAccessDenied          = errors.New("vault: only the vault's own user may use it")
+	ErrInvalidInput          = errors.New("vault: invalid input")
+	ErrNoSuchFolder          = errors.New("vault: no such folder")
+	ErrAmbiguous             = errors.New("vault: more than one match")
+	ErrItemExists            = errors.New("vault: a login of that name exists in that folder")
 )
 
 // TwoFactorRequiredError asks for a second factor: the providers the
@@ -74,6 +78,10 @@ var sentinels = []struct {
 	{errPrefix + "RepromptRequired", ErrRepromptRequired},
 	{errPrefix + "Unreachable", ErrUnreachable},
 	{errPrefix + "AccessDenied", ErrAccessDenied},
+	{errPrefix + "InvalidInput", ErrInvalidInput},
+	{errPrefix + "NoSuchFolder", ErrNoSuchFolder},
+	{errPrefix + "Ambiguous", ErrAmbiguous},
+	{errPrefix + "ItemExists", ErrItemExists},
 }
 
 // encodeError is err as the bus carries it: a contract error under its

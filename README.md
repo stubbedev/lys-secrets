@@ -101,8 +101,10 @@ Over `dev.stubbe.lys.Vault1` a listing carries names, usernames, URIs and
 which fields an item has, never a secret; a secret leaves one field at a
 time, only to a caller running as your user, and an item behind
 Bitwarden's master password reprompt gives one out only with the master
-password. Verification codes are computed here. The Go package `vault` is
-the contract and its client.
+password. Verification codes are computed here. `CreateLogin` adds a login
+(encrypted here, as Bitwarden's clients do) to a folder by name, and
+`FindLogin` looks one up by its exact name. The Go package `vault` is the
+contract and its client.
 
 ## Access
 

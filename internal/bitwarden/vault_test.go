@@ -3,35 +3,22 @@ package bitwarden
 import (
 	"bytes"
 	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
-// seal encrypts plain as a type 2 EncString under key, as Bitwarden's
-// clients do; decryption is pinned to Bitwarden's vectors, so the tests
-// may encrypt their fixtures.
 func seal(t *testing.T, key SymmetricKey, plain []byte) string {
 	t.Helper()
-	block, err := aes.NewCipher(key.enc)
+	e, err := key.encryptIV(plain, bytes.Repeat([]byte{7}, aes.BlockSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pad := aes.BlockSize - len(plain)%aes.BlockSize
-	data := append(append([]byte(nil), plain...), bytes.Repeat([]byte{byte(pad)}, pad)...)
-	iv := bytes.Repeat([]byte{7}, aes.BlockSize)
-	out := make([]byte, len(data))
-	cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, data)
-	m := hmac.New(sha256.New, key.mac)
-	m.Write(iv)
-	m.Write(out)
-	b64 := base64.StdEncoding.EncodeToString
-	return "2." + b64(iv) + "|" + b64(out) + "|" + b64(m.Sum(nil))
+	return e.String()
 }
 
 func testKey(fill byte) SymmetricKey {
@@ -131,5 +118,120 @@ func TestNetworkLogin(t *testing.T) {
 	}
 	if _, ok := networkLogin(items, "Personal", "Home Wi-Fi"); ok {
 		t.Error("a login outside the folder answered")
+	}
+}
+
+func TestURIChecksumMatchesBitwarden(t *testing.T) {
+	if got := uriChecksum("https://test.com"); got != "OWk2vQvwYD1nhLZdA+ltrpBWbDa2JmHyjUEWxRZSS8w=" {
+		t.Errorf("checksum = %s", got)
+	}
+	if got := uriChecksum("https://example.com"); got != "EAaArVRs5qV39C9S3zO0z9ynVoWeZkuNfeMpsVDQnOk=" {
+		t.Errorf("checksum = %s", got)
+	}
+}
+
+func TestEncryptLoginRoundTrip(t *testing.T) {
+	user := testKey(1)
+	kr := &Keyring{User: user}
+	l := vault.NewLogin{Folder: "Networks", Name: "Home", Username: "ann", Password: "hunter22", URIs: []string{"nm://home", "https://router.lan"}}
+	req, err := encryptLogin(user, "f1", l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plain := range []string{"Home", "ann", "hunter22", "nm://home"} {
+		if strings.Contains(string(raw), plain) {
+			t.Errorf("the request carries %q in the clear: %s", plain, raw)
+		}
+	}
+	var wire SyncCipher
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	wire.ID = "c1"
+	it := decryptCipher(kr, wire, map[string]string{"f1": "Networks"})
+	if it.Undecryptable || it.Type != vault.ItemLogin || it.Name != "Home" || it.Folder != "Networks" || it.Username != "ann" || it.Password != "hunter22" || !slices.Equal(it.URIs, l.URIs) {
+		t.Errorf("decrypted = %+v", it)
+	}
+	var uris struct {
+		Login struct{ URIs []uriRequest }
+	}
+	if err := json.Unmarshal(raw, &uris); err != nil {
+		t.Fatal(err)
+	}
+	for i, u := range uris.Login.URIs {
+		if sum, err := user.DecryptString(u.URIChecksum); err != nil || sum != uriChecksum(l.URIs[i]) {
+			t.Errorf("URI %d checksum = %q, %v", i, sum, err)
+		}
+	}
+	bare, err := encryptLogin(user, "", vault.NewLogin{Name: "Bare"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = json.Marshal(bare)
+	if strings.Contains(string(raw), "folderId") || strings.Contains(string(raw), "username") || strings.Contains(string(raw), "password") {
+		t.Errorf("empty values went out: %s", raw)
+	}
+}
+
+func TestEncryptedLengthsMatchTheContractsLimits(t *testing.T) {
+	for _, c := range []struct {
+		limit, fits int
+	}{{1000, 687}, {5000, 3695}, {10000, 7439}} {
+		for n, want := range map[int]bool{c.fits: true, c.fits + 1: false} {
+			s, err := testKey(1).EncryptString(strings.Repeat("x", n))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(s) <= c.limit; got != want {
+				t.Errorf("%d bytes encrypt to %d characters; within %d = %v, want %v", n, len(s), c.limit, got, want)
+			}
+		}
+	}
+	long := vault.NewLogin{Name: strings.Repeat("n", 687), Username: strings.Repeat("u", 687), Password: strings.Repeat("p", 3695), URIs: []string{strings.Repeat("u", 7439)}}
+	if err := long.Validate(); err != nil {
+		t.Errorf("the longest login is refused: %v", err)
+	}
+}
+
+func TestFindLoginMatching(t *testing.T) {
+	items := []Item{
+		{ID: "a", Type: vault.ItemLogin, Name: "Home", Folder: "Networks"},
+		{ID: "b", Type: vault.ItemLogin, Name: "Home"},
+		{ID: "c", Type: vault.ItemCard, Name: "Mail", Folder: "Networks"},
+		{ID: "d", Type: vault.ItemLogin, Name: "home", Folder: "Networks"},
+	}
+	if it, ok, err := findLogin(items, "Home", vault.InFolder("Networks")); err != nil || !ok || it.ID != "a" {
+		t.Errorf("scoped = %+v %v %v", it, ok, err)
+	}
+	if it, ok, err := findLogin(items, "Home", vault.InFolder("")); err != nil || !ok || it.ID != "b" {
+		t.Errorf("no folder = %+v %v %v", it, ok, err)
+	}
+	if _, ok, err := findLogin(items, "Home", vault.AnyFolder()); !errors.Is(err, vault.ErrAmbiguous) || ok {
+		t.Errorf("two matches = %v %v", ok, err)
+	}
+	if _, ok, err := findLogin(items, "Mail", vault.AnyFolder()); err != nil || ok {
+		t.Errorf("a card = %v %v", ok, err)
+	}
+}
+
+func TestVaultPutAndFolderID(t *testing.T) {
+	v := Vault{Folders: map[string]string{"f1": "Work", "f2": "Dup", "f3": "Dup"}}
+	v.put(Item{ID: "z", Name: "zeta"})
+	v.put(Item{ID: "a", Name: "alpha"})
+	v.put(Item{ID: "z", Name: "Zulu"})
+	if len(v.Items) != 2 || v.Items[0].ID != "a" || v.Items[1].Name != "Zulu" {
+		t.Errorf("items = %+v", v.Items)
+	}
+	if it, ok := v.Item("z"); !ok || it.Name != "Zulu" {
+		t.Errorf("by id = %+v %v", it, ok)
+	}
+	for name, want := range map[string]error{"": nil, "Work": nil, "Dup": vault.ErrAmbiguous, "None": vault.ErrNoSuchFolder} {
+		if _, err := v.folderID(name); !errors.Is(err, want) {
+			t.Errorf("folder %q = %v, want %v", name, err, want)
+		}
 	}
 }

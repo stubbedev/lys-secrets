@@ -420,21 +420,15 @@ func (s *Service) freshToken(ctx context.Context, c *Client, sess *session) (Tok
 func (s *Service) Sync(ctx context.Context) error {
 	s.op.Lock()
 	defer s.op.Unlock()
-	s.mu.Lock()
-	sess, kr := s.sess, s.kr
-	s.mu.Unlock()
-	if kr == nil {
+	if s.keyring() == nil {
 		return s.fail(fmt.Errorf("bitwarden: sync: %w", vault.ErrLocked))
 	}
-	c := s.newClient(sess.Server, s.device)
 	s.update(func() { s.status.Syncing = true })
-	tok, err := s.freshToken(ctx, c, sess)
+	a, err := s.authorize(ctx)
 	if err != nil {
-		return s.fail(err)
+		return s.fail(fmt.Errorf("bitwarden: sync: %w", err))
 	}
-	if sess = s.session(); sess == nil {
-		return s.fail(vault.ErrLoginRequired)
-	}
+	c, sess, kr, tok := a.client, a.sess, a.kr, a.tok
 	sync, err := c.Sync(ctx, tok.AccessToken)
 	if err != nil {
 		return s.fail(err)
@@ -463,6 +457,97 @@ func (s *Service) Sync(ctx context.Context) error {
 		s.status = vault.Status{State: vault.StateUnlocked, Email: sess.Email, LastSync: now, Items: len(v.Items)}
 	})
 	return nil
+}
+
+func (s *Service) keyring() *Keyring {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.kr
+}
+
+type authorized struct {
+	client *Client
+	sess   *session
+	kr     *Keyring
+	tok    Token
+}
+
+func (s *Service) authorize(ctx context.Context) (authorized, error) {
+	s.mu.Lock()
+	sess, kr := s.sess, s.kr
+	s.mu.Unlock()
+	if kr == nil {
+		return authorized{}, vault.ErrLocked
+	}
+	c := s.newClient(sess.Server, s.device)
+	tok, err := s.freshToken(ctx, c, sess)
+	if err != nil {
+		return authorized{}, err
+	}
+	if sess = s.session(); sess == nil {
+		return authorized{}, vault.ErrLoginRequired
+	}
+	return authorized{client: c, sess: sess, kr: kr, tok: tok}, nil
+}
+
+func (s *Service) FindLogin(name string, scope vault.FolderScope) (vault.Item, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kr == nil {
+		return vault.Item{}, false, vault.ErrLocked
+	}
+	it, ok, err := findLogin(s.vault.Items, name, scope)
+	if !ok || err != nil {
+		return vault.Item{}, false, err
+	}
+	return it.summary(), true, nil
+}
+
+func (s *Service) CreateLogin(ctx context.Context, l vault.NewLogin) (vault.ItemID, error) {
+	if err := l.Validate(); err != nil {
+		return "", fmt.Errorf("bitwarden: create a login: %w", err)
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	a, err := s.authorize(ctx)
+	if err != nil {
+		return "", fmt.Errorf("bitwarden: create a login: %w", err)
+	}
+	req, err := sealLocked(s, a.kr, func() (cipherRequest, error) {
+		folderID, err := s.vault.folderID(l.Folder)
+		if err != nil {
+			return cipherRequest{}, err
+		}
+		if len(logins(s.vault.Items, l.Name, vault.InFolder(l.Folder))) > 0 {
+			return cipherRequest{}, fmt.Errorf("%w: %q in %q", vault.ErrItemExists, l.Name, l.Folder)
+		}
+		return encryptLogin(a.kr.User, folderID, l)
+	})
+	if err != nil {
+		return "", fmt.Errorf("bitwarden: create a login: %w", err)
+	}
+	created, err := a.client.CreateCipher(ctx, a.tok.AccessToken, req)
+	if err != nil {
+		return "", err
+	}
+	s.update(func() {
+		if s.kr != a.kr {
+			return
+		}
+		s.vault.put(decryptCipher(a.kr, created, s.vault.Folders))
+		s.status.Items = len(s.vault.Items)
+	})
+	return vault.ItemID(created.ID), nil
+}
+
+func sealLocked[T any](s *Service, kr *Keyring, seal func() (T, error)) (T, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kr != kr {
+		var zero T
+		return zero, vault.ErrLocked
+	}
+	return seal()
 }
 
 // Lock wipes the keys and the plaintext; the session stays for Unlock.

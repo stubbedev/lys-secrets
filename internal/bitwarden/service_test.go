@@ -31,6 +31,8 @@ type account struct {
 	rejectRefr bool
 	grants     []string
 	itemName   string
+	posted     []map[string]any
+	postStatus int
 }
 
 func newAccount(t *testing.T) *account {
@@ -46,6 +48,7 @@ func newAccount(t *testing.T) *account {
 		writeJSON(w, 200, map[string]any{"KdfSettings": map[string]any{"KdfType": 0, "Iterations": 600000}, "Salt": "test@bitwarden.com"})
 	})
 	mux.HandleFunc("/identity/connect/token", a.token)
+	mux.HandleFunc("POST /api/ciphers", a.createCipher)
 	mux.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer at-") {
 			writeJSON(w, 401, map[string]any{"message": "unauthorized"})
@@ -101,6 +104,26 @@ func (a *account) token(w http.ResponseWriter, r *http.Request) {
 	}
 	a.refresh += "+"
 	writeJSON(w, 200, map[string]any{"access_token": "at-" + a.refresh, "refresh_token": a.refresh, "expires_in": 3600, "token_type": "Bearer"})
+}
+
+func (a *account) createCipher(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer at-") {
+		writeJSON(w, 401, map[string]any{"message": "unauthorized"})
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.t.Error(err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.postStatus != 0 {
+		writeJSON(w, a.postStatus, map[string]any{"message": "The field Name is invalid."})
+		return
+	}
+	a.posted = append(a.posted, body)
+	body["id"] = fmt.Sprintf("new-%d", len(a.posted))
+	writeJSON(w, 200, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -511,5 +534,86 @@ func TestServiceNetworkLogin(t *testing.T) {
 	s.Lock()
 	if _, ok := s.NetworkLogin("Networks", "Home"); ok {
 		t.Error("a locked vault answered")
+	}
+}
+
+func TestCreateLogin(t *testing.T) {
+	a := newAccount(t)
+	s := opened(t, a, Item{ID: "old", Type: vault.ItemLogin, Folder: "Networks", Name: "Office"})
+	s.mu.Lock()
+	s.vault.Folders = map[string]string{"f1": "Networks"}
+	s.mu.Unlock()
+	changes := s.changes
+	l := vault.NewLogin{Folder: "Networks", Name: "Home", Username: "ann", Password: "hunter22", URIs: []string{"nm://home"}}
+	id, err := s.CreateLogin(context.Background(), l)
+	if err != nil || id != "new-1" {
+		t.Fatalf("CreateLogin = %q, %v", id, err)
+	}
+	if s.changes == changes || s.Status().Items != 2 {
+		t.Errorf("no change announced: %d changes, status %+v", s.changes-changes, s.Status())
+	}
+	it, ok, err := s.FindLogin("Home", vault.InFolder("Networks"))
+	if err != nil || !ok || it.ID != "new-1" || it.Username != "ann" || !slices.Equal(it.URIs, l.URIs) {
+		t.Errorf("found = %+v %v %v", it, ok, err)
+	}
+	if v, err := s.Field("new-1", vault.FieldPassword, ""); err != nil || v.Text != "hunter22" {
+		t.Errorf("password = %+v, %v", v, err)
+	}
+	a.mu.Lock()
+	posted := a.posted[0]
+	a.mu.Unlock()
+	kr, err := Unlock(UnlockInput{Password: "asdfasdfasdf", Email: "test@bitwarden.com", Kdf: Kdf{Type: KdfPBKDF2, Iterations: 600000}, UserKey: testUserKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := kr.User.DecryptString(posted["name"].(string))
+	if err != nil || name != "Home" || posted["folderId"] != "f1" || posted["type"] != float64(1) {
+		t.Errorf("posted %v: name %q, %v", posted, name, err)
+	}
+	pw, err := kr.User.DecryptString(posted["login"].(map[string]any)["password"].(string))
+	if err != nil || pw != "hunter22" {
+		t.Errorf("posted password opens to %q, %v", pw, err)
+	}
+}
+
+func TestCreateLoginRefusals(t *testing.T) {
+	a := newAccount(t)
+	s := opened(t, a, Item{ID: "old", Type: vault.ItemLogin, Folder: "Networks", Name: "Home"})
+	s.mu.Lock()
+	s.vault.Folders = map[string]string{"f1": "Networks", "f2": "Twice", "f3": "Twice"}
+	s.mu.Unlock()
+	ctx := context.Background()
+	for _, c := range []struct {
+		l    vault.NewLogin
+		want error
+	}{
+		{vault.NewLogin{Folder: "Networks", Name: "Home", Password: "hunter22"}, vault.ErrItemExists},
+		{vault.NewLogin{Folder: "Absent", Name: "New", Password: "hunter22"}, vault.ErrNoSuchFolder},
+		{vault.NewLogin{Folder: "Twice", Name: "New", Password: "hunter22"}, vault.ErrAmbiguous},
+		{vault.NewLogin{Name: " ", Password: "hunter22"}, vault.ErrInvalidInput},
+	} {
+		if _, err := s.CreateLogin(ctx, c.l); !errors.Is(err, c.want) || strings.Contains(err.Error(), "hunter22") {
+			t.Errorf("%+v = %v, want %v", c.l, err, c.want)
+		}
+	}
+	a.mu.Lock()
+	a.postStatus = 400
+	a.mu.Unlock()
+	var se *vault.ServerError
+	if _, err := s.CreateLogin(ctx, vault.NewLogin{Name: "New", Password: "hunter22"}); !errors.As(err, &se) || se.Status != 400 {
+		t.Errorf("a refusing server = %v", err)
+	}
+	a.mu.Lock()
+	posted := len(a.posted)
+	a.mu.Unlock()
+	if posted != 0 || len(listed(t, s)) != 1 {
+		t.Errorf("a refused login reached the server or the vault: %d posted, %+v", posted, listed(t, s))
+	}
+	s.Lock()
+	if _, err := s.CreateLogin(ctx, vault.NewLogin{Name: "New"}); !errors.Is(err, vault.ErrLocked) {
+		t.Errorf("a locked vault = %v", err)
+	}
+	if _, _, err := s.FindLogin("Home", vault.AnyFolder()); !errors.Is(err, vault.ErrLocked) {
+		t.Errorf("find in a locked vault = %v", err)
 	}
 }

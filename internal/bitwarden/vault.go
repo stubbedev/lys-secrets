@@ -1,6 +1,9 @@
 package bitwarden
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -168,6 +171,11 @@ func DecryptVault(kr *Keyring, s SyncResponse) Vault {
 		}
 		v.Items = append(v.Items, decryptCipher(kr, c, v.Folders))
 	}
+	v.index()
+	return v
+}
+
+func (v *Vault) index() {
 	slices.SortStableFunc(v.Items, func(a, b Item) int {
 		if a.Favorite != b.Favorite {
 			if a.Favorite {
@@ -181,7 +189,45 @@ func DecryptVault(kr *Keyring, s SyncResponse) Vault {
 	for i, it := range v.Items {
 		v.byID[it.ID] = i
 	}
-	return v
+}
+
+func (v *Vault) put(it Item) {
+	if i, ok := v.byID[it.ID]; ok {
+		v.Items[i] = it
+	} else {
+		v.Items = append(v.Items, it)
+	}
+	v.index()
+}
+
+func (v *Vault) folderID(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	var ids []string
+	for id, n := range v.Folders {
+		if n == name {
+			ids = append(ids, id)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("%w: %q", vault.ErrNoSuchFolder, name)
+	case 1:
+		return ids[0], nil
+	default:
+		return "", fmt.Errorf("%w: %d folders are named %q", vault.ErrAmbiguous, len(ids), name)
+	}
+}
+
+func logins(items []Item, name string, scope vault.FolderScope) []Item {
+	var out []Item
+	for _, it := range items {
+		if it.Type == vault.ItemLogin && it.Name == name && scope.Contains(it.Folder) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // decryptCipher opens one item under its organization's key or the
@@ -332,16 +378,81 @@ func (it Item) value(f vault.Field, now time.Time) (vault.Value, error) {
 // decrypted is no answer: a network secret is sent without asking, so
 // it must be unambiguous and unprotected.
 func networkLogin(items []Item, folder, name string) (Item, bool) {
-	var found Item
-	matches := 0
-	for _, it := range items {
-		if it.Type == vault.ItemLogin && it.Folder == folder && it.Name == name {
-			found = it
-			matches++
-		}
-	}
-	if matches != 1 || found.Reprompt || found.Undecryptable {
+	found := logins(items, name, vault.InFolder(folder))
+	if len(found) != 1 || found[0].Reprompt || found[0].Undecryptable {
 		return Item{}, false
 	}
-	return found, true
+	return found[0], true
+}
+
+func findLogin(items []Item, name string, scope vault.FolderScope) (Item, bool, error) {
+	found := logins(items, name, scope)
+	switch len(found) {
+	case 0:
+		return Item{}, false, nil
+	case 1:
+		return found[0], true, nil
+	default:
+		return Item{}, false, fmt.Errorf("%w: %d logins are named %q", vault.ErrAmbiguous, len(found), name)
+	}
+}
+
+type cipherRequest struct {
+	Type     vault.ItemType `json:"type"`
+	FolderID string         `json:"folderId,omitempty"`
+	Name     string         `json:"name"`
+	Favorite bool           `json:"favorite"`
+	Reprompt int            `json:"reprompt"`
+	Login    *loginRequest  `json:"login,omitempty"`
+}
+
+type loginRequest struct {
+	Username string       `json:"username,omitempty"`
+	Password string       `json:"password,omitempty"`
+	URIs     []uriRequest `json:"uris"`
+}
+
+type uriRequest struct {
+	URI         string `json:"uri"`
+	URIChecksum string `json:"uriChecksum"`
+}
+
+func encryptLogin(key SymmetricKey, folderID string, l vault.NewLogin) (cipherRequest, error) {
+	seal := func(what, s string) (string, error) {
+		if s == "" {
+			return "", nil
+		}
+		e, err := key.EncryptString(s)
+		if err != nil {
+			return "", fmt.Errorf("bitwarden: encrypt the %s: %w", what, err)
+		}
+		return e, nil
+	}
+	name, errN := seal("name", l.Name)
+	username, errU := seal("username", l.Username)
+	password, errP := seal("password", l.Password)
+	if err := errors.Join(errN, errU, errP); err != nil {
+		return cipherRequest{}, err
+	}
+	uris := make([]uriRequest, len(l.URIs))
+	for i, u := range l.URIs {
+		uri, err := seal("URI", u)
+		if err != nil {
+			return cipherRequest{}, err
+		}
+		checksum, err := seal("URI checksum", uriChecksum(u))
+		if err != nil {
+			return cipherRequest{}, err
+		}
+		uris[i] = uriRequest{URI: uri, URIChecksum: checksum}
+	}
+	return cipherRequest{
+		Type: vault.ItemLogin, FolderID: folderID, Name: name,
+		Login: &loginRequest{Username: username, Password: password, URIs: uris},
+	}, nil
+}
+
+func uriChecksum(uri string) string {
+	sum := sha256.Sum256([]byte(uri))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }

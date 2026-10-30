@@ -221,3 +221,42 @@ func dispatch(sig *dbus.Signal, w Watcher) {
 		w.SyncFailed(err)
 	}
 }
+
+func (c *Client) CreateLogin(ctx context.Context, l NewLogin) (ItemID, error) {
+	if err := l.Validate(); err != nil {
+		return "", fmt.Errorf("vault: CreateLogin: %w", err)
+	}
+	uris := l.URIs
+	if uris == nil {
+		uris = []string{}
+	}
+	var id string
+	if err := c.call(ctx, "CreateLogin", l.Folder, l.Name, l.Username, l.Password, uris).Store(&id); err != nil {
+		return "", decodeError(err)
+	}
+	if id == "" {
+		return "", errors.New("vault: CreateLogin answered no id")
+	}
+	return ItemID(id), nil
+}
+
+func (c *Client) FindLogin(ctx context.Context, name string, scope FolderScope) (Item, bool, error) {
+	folder, scoped := scope.Folder()
+	var (
+		found bool
+		it    Item
+	)
+	if err := c.call(ctx, "FindLogin", name, scoped, folder).Store(&found, &it); err != nil {
+		return Item{}, false, decodeError(err)
+	}
+	if !found {
+		return Item{}, false, nil
+	}
+	if err := it.check(); err != nil {
+		return Item{}, false, fmt.Errorf("vault: FindLogin: %w", err)
+	}
+	if it.Type != ItemLogin || it.Name != name || !scope.Contains(it.Folder) {
+		return Item{}, false, fmt.Errorf("vault: FindLogin answered item %s, not a login named as asked", it.ID)
+	}
+	return it, true, nil
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -212,5 +213,35 @@ func TestEndpointsOf(t *testing.T) {
 	own, _ := vault.ParseServer("https://vault.example.com/")
 	if e := endpointsOf(own); e.API != "https://vault.example.com/api" || e.Identity != "https://vault.example.com/identity" {
 		t.Errorf("self-hosted = %+v", e)
+	}
+}
+
+func TestCreateCipher(t *testing.T) {
+	var got []byte
+	f := newFakeServer(t, map[string]http.HandlerFunc{
+		"/api/ciphers": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer at" || r.Header.Get("Content-Type") != "application/json" {
+				reply(401, `{"message":"no"}`)(w, r)
+				return
+			}
+			got, _ = io.ReadAll(r.Body)
+			reply(200, `{"id":"c9","type":1,"folderId":"f1","name":"2.n","login":{"username":"2.u"}}`)(w, r)
+		},
+	})
+	c, err := testClient(f).CreateCipher(context.Background(), "at", cipherRequest{Type: vault.ItemLogin, FolderID: "f1", Name: "2.n", Login: &loginRequest{Username: "2.u", URIs: []uriRequest{}}})
+	if err != nil || c.ID != "c9" || c.FolderID != "f1" || c.Login.Username != "2.u" {
+		t.Errorf("created = %+v, %v", c, err)
+	}
+	const want = `{"type":1,"folderId":"f1","name":"2.n","favorite":false,"reprompt":0,"login":{"username":"2.u","uris":[]}}`
+	if string(got) != want {
+		t.Errorf("request = %s, want %s", got, want)
+	}
+	var ae *APIError
+	if _, err := testClient(f).CreateCipher(context.Background(), "bad", cipherRequest{}); !errors.As(err, &ae) || ae.Status != 401 {
+		t.Errorf("unauthorized = %v", err)
+	}
+	g := newFakeServer(t, map[string]http.HandlerFunc{"/api/ciphers": reply(200, `{}`)})
+	if _, err := testClient(g).CreateCipher(context.Background(), "at", cipherRequest{}); err == nil {
+		t.Error("an answer without an id was taken")
 	}
 }
