@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -373,5 +374,77 @@ func TestUnknownAlgorithmIsNotSupported(t *testing.T) {
 	var de dbus.Error
 	if !errors.As(err, &de) || de.Name != errNotSupported {
 		t.Errorf("OpenSession(rot13) = %v, want NotSupported", err)
+	}
+}
+
+// requireGone checks that path on conn's unique name answers method
+// with an unknown object, interface or method: nothing is exported
+// there.
+func requireGone(t *testing.T, client, conn *dbus.Conn, path dbus.ObjectPath, method string, args ...any) {
+	t.Helper()
+	err := client.Object(conn.Names()[0], path).Call(method, 0, args...).Err
+	var de dbus.Error
+	unknown := []string{"org.freedesktop.DBus.Error.UnknownObject", "org.freedesktop.DBus.Error.UnknownInterface", "org.freedesktop.DBus.Error.UnknownMethod"}
+	if !errors.As(err, &de) || !slices.Contains(unknown, de.Name) {
+		t.Errorf("%s at %s = %v, want it unknown", method, path, err)
+	}
+}
+
+func TestFailedStartLeavesNothingExported(t *testing.T) {
+	f := newFixture(t)
+	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.Close()
+	other := f.bus.Conn(t)
+	if _, err := other.RequestName(BusName, dbus.NameFlagDoNotQueue); err != nil {
+		t.Fatal(err)
+	}
+	conn := f.bus.Conn(t)
+	if _, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, Vault: &fakeVault{changed: func() {}}}); !errors.Is(err, dbusx.ErrNameTaken) {
+		t.Fatalf("Start = %v, want dbusx.ErrNameTaken", err)
+	}
+	client := f.bus.Conn(t)
+	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
+	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
+	requireGone(t, client, conn, dbus.ObjectPath(aliasBase+"default"), ifaceCollection+".SearchItems", map[string]string{})
+	requireGone(t, client, conn, collectionPath("nothing"), ifaceCollection+".SearchItems", map[string]string{})
+	requireGone(t, client, conn, collectionPath(VaultID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
+	if _, err := other.ReleaseName(BusName); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter})
+	if err != nil {
+		t.Fatalf("Start again on the same connection = %v", err)
+	}
+	t.Cleanup(svc.Close)
+}
+
+func TestCloseUnexportsTheService(t *testing.T) {
+	f := newFixture(t)
+	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	client := f.bus.Conn(t)
+	root := client.Object(BusName, rootPath)
+	var out dbus.Variant
+	var sess dbus.ObjectPath
+	if err := root.Call(ifaceService+".OpenSession", 0, algPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
+		t.Fatal(err)
+	}
+	var coll, prompt dbus.ObjectPath
+	if err := root.Call(ifaceService+".CreateCollection", 0, map[string]dbus.Variant{}, "").Store(&coll, &prompt); err != nil || prompt == noPrompt {
+		t.Fatalf("CreateCollection = %q, %q, %v; want a prompt", coll, prompt, err)
+	}
+	f.svc.Close()
+	conn := f.svc.conn
+	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
+	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
+	requireGone(t, client, conn, dbus.ObjectPath(aliasBase+"default"), ifaceCollection+".SearchItems", map[string]string{})
+	requireGone(t, client, conn, sess, ifaceSession+".Close")
+	requireGone(t, client, conn, prompt, ifacePrompt+".Dismiss")
+	var owner string
+	if err := client.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, BusName).Store(&owner); err == nil {
+		t.Errorf("%s is still owned by %s after Close", BusName, owner)
 	}
 }

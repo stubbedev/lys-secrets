@@ -98,10 +98,13 @@ type Service struct {
 	aliases  map[string]string
 	aliasOff map[string]func()
 	sessions map[dbus.ObjectPath]*session
+	prompts  map[dbus.ObjectPath]func()
 	nextID   uint64
-	signals  chan *dbus.Signal
 	closed   bool
-	release  func()
+	// stops undo, in reverse, what Start set up beyond the collections,
+	// aliases, vault, sessions and prompts: the root object, the
+	// missing-collection subtrees, the owner watch and the bus name.
+	stops []func()
 	// vault is the vault collection, nil without a Config.Vault.
 	vault *vaultColl
 }
@@ -113,6 +116,18 @@ type collection struct {
 	items map[uint32]func()
 }
 
+// unexport takes the collection and its items off the connection.
+func (c *collection) unexport() {
+	for id, off := range c.items {
+		off()
+		delete(c.items, id)
+	}
+	if c.off != nil {
+		c.off()
+		c.off = nil
+	}
+}
+
 type session struct {
 	owner string
 	t     transport
@@ -121,11 +136,13 @@ type session struct {
 
 // Start loads the collections in cfg.Dir, exports them on conn and takes
 // the bus name. A name another provider holds is dbusx.ErrNameTaken:
-// the service never queues for it or replaces the owner.
+// the service never queues for it or replaces the owner. A failed Start
+// leaves nothing exported or watched on conn.
 func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 	s := &Service{
 		conn: conn, cfg: cfg, disk: disk{dir: cfg.Dir},
-		colls: map[string]*collection{}, aliasOff: map[string]func(){}, sessions: map[dbus.ObjectPath]*session{},
+		colls: map[string]*collection{}, aliasOff: map[string]func(){},
+		sessions: map[dbus.ObjectPath]*session{}, prompts: map[dbus.ObjectPath]func(){},
 	}
 	var err error
 	if s.aliases, err = s.disk.loadAliases(); err != nil {
@@ -148,42 +165,89 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := dbusx.Export(conn, rootPath, dbusx.Interface{
-		Name: ifaceService, Methods: serviceMethods{s},
-		Properties: dbusx.Getters{"Collections": s.collectionPathsLocked},
-	}); err != nil {
-		return nil, err
-	}
-	for _, base := range []string{aliasBase, collectionBase} {
-		if err := conn.ExportSubtree(missingCollection{}, dbus.ObjectPath(strings.TrimSuffix(base, "/")), ifaceCollection); err != nil {
-			return nil, fmt.Errorf("export the missing-collection fallback: %w", err)
-		}
-	}
-	for _, c := range s.colls {
-		if err := s.exportCollectionLocked(c); err != nil {
-			return nil, err
-		}
-	}
-	for alias := range s.aliases {
-		if err := s.exportAliasLocked(alias); err != nil {
-			return nil, err
-		}
-	}
-	if cfg.Vault != nil {
-		if err := s.startVaultLocked(cfg.Vault); err != nil {
-			return nil, fmt.Errorf("the vault collection: %w", err)
-		}
-	}
-	if err := s.watchOwners(); err != nil {
-		return nil, err
-	}
-	if s.release, err = dbusx.Own(conn, BusName); err != nil {
+	if err := s.serveLocked(); err != nil {
+		s.withdrawLocked()
 		return nil, err
 	}
 	return s, nil
 }
 
-// Close locks every collection and gives up the bus name.
+// serveLocked exports the service, its collections, aliases and vault,
+// watches for clients leaving and takes the bus name last.
+func (s *Service) serveLocked() error {
+	off, err := dbusx.Export(s.conn, rootPath, dbusx.Interface{
+		Name: ifaceService, Methods: serviceMethods{s},
+		Properties: dbusx.Getters{"Collections": s.collectionPathsLocked},
+	})
+	if err != nil {
+		return err
+	}
+	s.stops = append(s.stops, off)
+	for _, base := range []string{aliasBase, collectionBase} {
+		path := dbus.ObjectPath(strings.TrimSuffix(base, "/"))
+		if err := s.conn.ExportSubtree(missingCollection{}, path, ifaceCollection); err != nil {
+			return fmt.Errorf("export the missing-collection fallback: %w", err)
+		}
+		s.stops = append(s.stops, func() { _ = s.conn.Export(nil, path, ifaceCollection) })
+	}
+	for _, c := range s.colls {
+		if err := s.exportCollectionLocked(c); err != nil {
+			return err
+		}
+	}
+	for alias := range s.aliases {
+		if err := s.exportAliasLocked(alias); err != nil {
+			return err
+		}
+	}
+	if s.cfg.Vault != nil {
+		if err := s.startVaultLocked(s.cfg.Vault); err != nil {
+			return fmt.Errorf("the vault collection: %w", err)
+		}
+	}
+	if err := s.watchOwners(); err != nil {
+		return err
+	}
+	release, err := dbusx.Own(s.conn, BusName)
+	if err != nil {
+		return err
+	}
+	s.stops = append(s.stops, release)
+	return nil
+}
+
+// withdrawLocked gives up the bus name, stops the owner watch and
+// unexports every object the service put on its connection.
+func (s *Service) withdrawLocked() {
+	for _, stop := range slices.Backward(s.stops) {
+		stop()
+	}
+	s.stops = nil
+	for _, c := range s.colls {
+		c.unexport()
+	}
+	for alias, off := range s.aliasOff {
+		off()
+		delete(s.aliasOff, alias)
+	}
+	if vc := s.vault; vc != nil {
+		for p, off := range vc.items {
+			off()
+			delete(vc.items, p)
+		}
+		vc.off()
+	}
+	for path := range s.sessions {
+		s.closeSessionLocked(path)
+	}
+	for path, off := range s.prompts {
+		off()
+		delete(s.prompts, path)
+	}
+}
+
+// Close locks every collection, gives up the bus name and unexports
+// everything Start exported.
 func (s *Service) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,12 +258,7 @@ func (s *Service) Close() {
 	for _, c := range s.colls {
 		_ = c.kr.Lock()
 	}
-	if s.signals != nil {
-		s.conn.RemoveSignal(s.signals)
-	}
-	if s.release != nil {
-		s.release()
-	}
+	s.withdrawLocked()
 }
 
 func (s *Service) now() time.Time {
@@ -495,37 +554,57 @@ func (s *Service) lockCollectionLocked(c *collection) {
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 }
 
-// watchOwners closes a client's sessions when it leaves the bus.
+// watchOwners closes a client's sessions when it leaves the bus, until
+// the stop it adds to s.stops runs.
 func (s *Service) watchOwners() error {
-	if err := s.conn.AddMatchSignal(
+	match := []dbus.MatchOption{
 		dbus.WithMatchSender("org.freedesktop.DBus"),
 		dbus.WithMatchInterface("org.freedesktop.DBus"),
 		dbus.WithMatchMember("NameOwnerChanged"),
-	); err != nil {
+	}
+	if err := s.conn.AddMatchSignal(match...); err != nil {
 		return fmt.Errorf("watch bus clients: %w", err)
 	}
-	s.signals = make(chan *dbus.Signal, 64)
-	s.conn.Signal(s.signals)
-	go func() {
-		for sig := range s.signals {
-			if sig.Name != "org.freedesktop.DBus.NameOwnerChanged" || len(sig.Body) != 3 {
-				continue
-			}
-			name, _ := sig.Body[0].(string)
-			newOwner, _ := sig.Body[2].(string)
-			if newOwner != "" || !strings.HasPrefix(name, ":") {
-				continue
-			}
-			s.mu.Lock()
-			for path, sess := range s.sessions {
-				if sess.owner == name {
-					s.closeSessionLocked(path)
-				}
-			}
-			s.mu.Unlock()
-		}
-	}()
+	signals := make(chan *dbus.Signal, 64)
+	done := make(chan struct{})
+	s.conn.Signal(signals)
+	s.stops = append(s.stops, func() {
+		s.conn.RemoveSignal(signals)
+		_ = s.conn.RemoveMatchSignal(match...)
+		close(done)
+	})
+	go s.closeSessionsOfLeavers(signals, done)
 	return nil
+}
+
+func (s *Service) closeSessionsOfLeavers(signals <-chan *dbus.Signal, done <-chan struct{}) {
+	for {
+		var sig *dbus.Signal
+		select {
+		case <-done:
+			return
+		case got, ok := <-signals:
+			if !ok {
+				return
+			}
+			sig = got
+		}
+		if sig.Name != "org.freedesktop.DBus.NameOwnerChanged" || len(sig.Body) != 3 {
+			continue
+		}
+		name, _ := sig.Body[0].(string)
+		newOwner, _ := sig.Body[2].(string)
+		if newOwner != "" || !strings.HasPrefix(name, ":") {
+			continue
+		}
+		s.mu.Lock()
+		for path, sess := range s.sessions {
+			if sess.owner == name {
+				s.closeSessionLocked(path)
+			}
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Service) closeSessionLocked(path dbus.ObjectPath) {

@@ -378,10 +378,7 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 		return "", dbusx.Failed(err.Error())
 	}
 	_ = c.kr.Lock()
-	for _, off := range c.items {
-		off()
-	}
-	c.off()
+	c.unexport()
 	delete(s.colls, c.id)
 	for alias, id := range s.aliases {
 		if id == c.id {
@@ -602,6 +599,7 @@ func (s *Service) newPrompt(run func(ctx context.Context) (bool, dbus.Variant)) 
 		return "", dbusx.Failed(err.Error())
 	}
 	p.off = off
+	s.prompts[p.path] = off
 	return p.path, nil
 }
 
@@ -647,6 +645,9 @@ func (p *prompt) complete(dismissed bool, result dbus.Variant) {
 	if err := p.s.conn.Emit(p.path, ifacePrompt+".Completed", dismissed, result); err != nil {
 		log.Printf("secrets: emit Completed: %v", err)
 	}
+	p.s.mu.Lock()
+	delete(p.s.prompts, p.path)
+	p.s.mu.Unlock()
 	p.off()
 }
 

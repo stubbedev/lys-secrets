@@ -53,12 +53,14 @@ type Vault interface {
 }
 
 // vaultColl is the vault collection as exported: whether the vault is
-// open, its logins by item path, and each item's unexport.
+// open, its logins by item path, each item's unexport and the
+// collection's own.
 type vaultColl struct {
 	v      Vault
 	open   bool
 	logins map[dbus.ObjectPath]VaultLogin
 	items  map[dbus.ObjectPath]func()
+	off    func()
 }
 
 func vaultItemPath(id string) dbus.ObjectPath {
@@ -81,7 +83,7 @@ func (s *Service) startVaultLocked(v Vault) error {
 		return errors.New("a keyring collection named " + VaultID + " stands where the vault collection goes; rename " + s.disk.path(VaultID))
 	}
 	vc := &vaultColl{v: v, logins: map[dbus.ObjectPath]VaultLogin{}, items: map[dbus.ObjectPath]func(){}}
-	if _, err := dbusx.Export(s.conn, collectionPath(VaultID), dbusx.Interface{
+	off, err := dbusx.Export(s.conn, collectionPath(VaultID), dbusx.Interface{
 		Name: ifaceCollection, Methods: vaultCollectionMethods{s},
 		Properties: dbusx.Getters{
 			"Items":    s.locked(func() any { return slices.Sorted(maps.Keys(s.vault.logins)) }),
@@ -90,9 +92,11 @@ func (s *Service) startVaultLocked(v Vault) error {
 			"Created":  func() any { return uint64(0) },
 			"Modified": func() any { return uint64(0) },
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
+	vc.off = off
 	s.vault = vc
 	s.syncVaultLocked()
 	return nil
