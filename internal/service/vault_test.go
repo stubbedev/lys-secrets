@@ -263,3 +263,29 @@ func mustMarshal(t *testing.T, c *collection) []byte {
 	}
 	return data
 }
+
+func TestVaultSearchMatchesTheExportedAttributes(t *testing.T) {
+	mail := VaultLogin{ID: "m", Name: "Mail", Username: "ada", URI: "https://mail.example.com", Folder: "Desktop"}
+	chat := VaultLogin{ID: "c", Name: "Chat", Folder: "Desktop"}
+	s := &Service{vault: &vaultColl{open: true, logins: map[dbus.ObjectPath]VaultLogin{
+		vaultItemPath(mail.ID): mail, vaultItemPath(chat.ID): chat,
+	}}}
+	both := []dbus.ObjectPath{vaultItemPath(chat.ID), vaultItemPath(mail.ID)}
+	slices.Sort(both)
+	cases := []struct {
+		query map[string]string
+		want  []dbus.ObjectPath
+	}{
+		{mail.attributes(), []dbus.ObjectPath{vaultItemPath(mail.ID)}},
+		{chat.attributes(), []dbus.ObjectPath{vaultItemPath(chat.ID)}},
+		{map[string]string{"folder": "Desktop", "xdg:schema": vaultSchema}, both},
+		{map[string]string{"username": ""}, []dbus.ObjectPath{vaultItemPath(chat.ID)}},
+		{map[string]string{"server": "mail.example.com"}, []dbus.ObjectPath{}},
+		{nil, both},
+	}
+	for _, tc := range cases {
+		if got := s.searchVaultLocked(tc.query); !slices.Equal(got, tc.want) {
+			t.Errorf("search %v = %v, want %v", tc.query, got, tc.want)
+		}
+	}
+}

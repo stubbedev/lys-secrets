@@ -26,16 +26,43 @@ type VaultLogin struct {
 	ID, Name, Username, URI, Folder string
 }
 
-// attributes are the item's lookup attributes: its schema, its vault id
-// and name, and the username, URI and folder it has.
+var vaultAttributeNames = [...]string{"xdg:schema", "bitwarden:id", "name", "username", "uri", "folder"}
+
+func (l VaultLogin) attribute(name string) (value string, present bool) {
+	switch name {
+	case "xdg:schema":
+		return vaultSchema, true
+	case "bitwarden:id":
+		return l.ID, true
+	case "name":
+		return l.Name, true
+	case "username":
+		return l.Username, l.Username != ""
+	case "uri":
+		return l.URI, l.URI != ""
+	case "folder":
+		return l.Folder, l.Folder != ""
+	}
+	return "", false
+}
+
 func (l VaultLogin) attributes() map[string]string {
-	a := map[string]string{"xdg:schema": vaultSchema, "bitwarden:id": l.ID, "name": l.Name}
-	for k, v := range map[string]string{"username": l.Username, "uri": l.URI, "folder": l.Folder} {
-		if v != "" {
-			a[k] = v
+	a := make(map[string]string, len(vaultAttributeNames))
+	for _, name := range vaultAttributeNames {
+		if v, ok := l.attribute(name); ok {
+			a[name] = v
 		}
 	}
 	return a
+}
+
+func (l VaultLogin) matches(want map[string]string) bool {
+	for k, v := range want {
+		if got, _ := l.attribute(k); got != v {
+			return false
+		}
+	}
+	return true
 }
 
 // Vault is the Bitwarden vault behind the vault collection.
@@ -181,22 +208,13 @@ func (s *Service) searchVaultLocked(attrs map[string]string) []dbus.ObjectPath {
 	if s.vault == nil || !s.vault.open {
 		return out
 	}
-	for _, p := range slices.Sorted(maps.Keys(s.vault.logins)) {
-		have := s.vault.logins[p].attributes()
-		if matches(have, attrs) {
+	for p, l := range s.vault.logins {
+		if l.matches(attrs) {
 			out = append(out, p)
 		}
 	}
+	slices.Sort(out)
 	return out
-}
-
-func matches(have, want map[string]string) bool {
-	for k, v := range want {
-		if have[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // vaultSecretLocked is vault item p's password, encoded for sess.
