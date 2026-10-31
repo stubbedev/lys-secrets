@@ -361,12 +361,12 @@ func (c *Collection) Search(attrs map[string]string) []uint32 {
 		want = append(want, hashAttr(name, value))
 	}
 	var out []uint32
-	for _, id := range c.IDs() {
-		e := c.entries[id]
+	for id, e := range c.entries {
 		if !slices.ContainsFunc(want, func(h attrHash) bool { return !slices.Contains(e.hashes, h) }) {
 			out = append(out, id)
 		}
 	}
+	slices.Sort(out)
 	return out
 }
 
