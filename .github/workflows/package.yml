@@ -43,6 +43,9 @@ jobs:
                   sudo apt-get install -y --no-install-recommends build-essential debhelper dpkg-dev
                   ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" deb
 
+            - name: Install and run the Debian package
+              run: sudo ./scripts/ci/smoke-test.sh debbuild/DEBS/amd64/*.deb
+
             - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: archive
@@ -76,6 +79,9 @@ jobs:
               run: |
                   dnf -y --setopt=install_weak_deps=False install rpm-build systemd-rpm-macros
                   ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" rpm
+
+            - name: Install and run the RPM package
+              run: ./scripts/ci/smoke-test.sh rpmbuild/RPMS/x86_64/*.rpm
 
             - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
