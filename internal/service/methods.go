@@ -325,7 +325,10 @@ func (m serviceMethods) ReadAlias(name string) (dbus.ObjectPath, *dbus.Error) {
 	return noPrompt, nil
 }
 
-// SetAlias points an alias at a collection, or removes it with "/".
+// SetAlias points an alias at a collection, or removes it with "/". The
+// collection it points at and the one it would point at must be unlocked,
+// since a locked collection cannot be changed; otherwise it is IsLocked and
+// the client must unlock first.
 func (m serviceMethods) SetAlias(name string, collection dbus.ObjectPath) *dbus.Error {
 	s := m.s
 	if !validID(name) {
@@ -333,11 +336,17 @@ func (m serviceMethods) SetAlias(name string, collection dbus.ObjectPath) *dbus.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if current, ok := s.colls[s.aliases[name]]; ok && current.kr.Locked() {
+		return lockedErr(keyring.ErrLocked)
+	}
 	id := ""
 	if collection != noPrompt {
 		c, item, ok := s.resolveLocked(collection)
 		if !ok || item != 0 {
 			return noSuchObject(collection)
+		}
+		if c.kr.Locked() {
+			return lockedErr(keyring.ErrLocked)
 		}
 		id = c.id
 	}

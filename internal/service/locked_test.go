@@ -292,3 +292,89 @@ func TestUnlockRewritesAFileOfTheFirstFormat(t *testing.T) {
 		t.Errorf("the rewritten file does not open: %v", err)
 	}
 }
+
+func aliasesFileBytes(t *testing.T, f *fixture) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.dir, aliasesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func (f *fixture) createCollection(t *testing.T, conn *dbus.Conn, label string) {
+	t.Helper()
+	var coll, prompt dbus.ObjectPath
+	props := map[string]dbus.Variant{propCollLabel: dbus.MakeVariant(label)}
+	if err := conn.Object(BusName, rootPath).Call(ifaceService+".CreateCollection", 0, props, "").Store(&coll, &prompt); err != nil || prompt == noPrompt {
+		t.Fatalf("CreateCollection = %q, %q, %v; want a prompt", coll, prompt, err)
+	}
+	if f.showPrompt(t, conn, prompt, "other-pw") {
+		t.Fatal("the create prompt was dismissed")
+	}
+}
+
+func setAlias(conn *dbus.Conn, name string, target dbus.ObjectPath) error {
+	return conn.Object(BusName, rootPath).Call(ifaceService+".SetAlias", 0, name, target).Err
+}
+
+func TestTheAliasOfALockedCollectionCannotMove(t *testing.T) {
+	for _, state := range lockStates {
+		for _, target := range []struct {
+			name string
+			path dbus.ObjectPath
+		}{{"removed", noPrompt}, {"moved to another", collectionPath("other")}} {
+			t.Run(state.name+"/"+target.name, func(t *testing.T) {
+				f, conn, _ := lockedLogin(t, state.restart)
+				f.createCollection(t, conn, "other")
+				before := aliasesFileBytes(t, f)
+
+				requireDBusError(t, "SetAlias", setAlias(conn, "default", target.path), errIsLocked)
+
+				if got := readDefaultAlias(t, conn); got != collectionPath(LoginID) {
+					t.Errorf("default = %s, want it still on the login collection", got)
+				}
+				if !bytes.Equal(aliasesFileBytes(t, f), before) {
+					t.Error("the refused call changed the alias file")
+				}
+			})
+		}
+	}
+}
+
+func TestAnAliasCannotMoveOntoALockedCollection(t *testing.T) {
+	_, conn, _ := lockedLogin(t, false)
+	requireDBusError(t, "SetAlias", setAlias(conn, "mine", collectionPath(LoginID)), errIsLocked)
+	var got dbus.ObjectPath
+	if err := conn.Object(BusName, rootPath).Call(ifaceService+".ReadAlias", 0, "mine").Store(&got); err != nil || got != noPrompt {
+		t.Errorf("ReadAlias(mine) = %s, %v; want none", got, err)
+	}
+}
+
+func TestAnAliasMovesBetweenUnlockedCollections(t *testing.T) {
+	f, conn, _ := lockedLogin(t, false)
+	if err := f.svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	f.createCollection(t, conn, "other")
+	if err := setAlias(conn, "default", collectionPath("other")); err != nil {
+		t.Fatalf("SetAlias = %v", err)
+	}
+	if got := readDefaultAlias(t, conn); got != collectionPath("other") {
+		t.Errorf("default = %s", got)
+	}
+}
+
+func TestUnlockingLetsTheAliasMove(t *testing.T) {
+	f, conn, _ := lockedLogin(t, true)
+	requireDBusError(t, "SetAlias", setAlias(conn, "default", noPrompt), errIsLocked)
+	if f.unlockThroughPrompt(t, conn, collectionPath(LoginID), loginPassword) {
+		t.Fatal("the unlock prompt was dismissed")
+	}
+	if err := setAlias(conn, "default", noPrompt); err != nil {
+		t.Fatalf("SetAlias after unlocking = %v", err)
+	}
+	if got := readDefaultAlias(t, conn); got != noPrompt {
+		t.Errorf("default = %s after removing it", got)
+	}
+}
