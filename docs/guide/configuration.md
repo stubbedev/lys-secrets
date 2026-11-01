@@ -1,21 +1,30 @@
 # Configuration
 
 lys-secrets has no configuration file. Its settings are command-line flags, and
-the Nix modules write those flags for you. All of them except `--unlock-fd` are
-about the Bitwarden vault.
+the Nix modules write those flags for you.
 
 ## Command-line flags
 
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `--unlock-fd N` | none | Read the login password from inherited descriptor `N` and unlock the `login` collection with it, creating the collection if there is none |
+| `--collection-lock-after D` | `0` | Lock a collection once no secret was read from it and nothing in it changed for this long; `0` keeps it open until something locks it |
+| `--collection-lock-on-screen-lock` | off | Lock every collection when logind says the session locked |
 | `--vault-lock-after D` | `15m` | Lock the vault once no field was read from it for this long; `0` keeps it open until something locks it |
 | `--vault-sync-interval D` | `30m` | Sync the open vault this often; `0` syncs only on unlock and when asked |
 | `--vault-collection-folder NAME` | empty | Show the logins of this vault folder as the read-only `bitwarden` collection; empty shows none |
 
 Durations use Go's syntax, such as `90s` or `1h30m`. A negative one is refused at
-start. The idle lock and the sync interval are checked every 30 seconds, so they
-act up to that much late.
+start. The vault's idle lock and its sync interval are checked every 30 seconds, so
+they act up to that much late. A collection's idle lock acts on time, and counts
+time the machine was suspended, acting within 30 seconds of it waking.
+
+`--collection-lock-on-screen-lock` watches the logind session on the system bus: its
+`Lock` signal and its `LockedHint` turning true, which lys-login's lock screen sets.
+Unlocking through lys-login's lock screen reopens `login`; other collections ask for
+their password when next used. If logind cannot be reached, lys-secrets keeps serving
+and logs that collections will not lock with the screen. It does not touch the vault,
+which keeps to `--vault-lock-after`.
 
 `--unlock-fd` reads the whole descriptor, at most 4096 bytes, and drops one
 trailing newline. A password that does not open the collection is logged and
@@ -48,6 +57,8 @@ Both the NixOS and the home-manager module take these, under
 | --- | --- | --- |
 | `enable` | `false` | |
 | `package` | the flake's package | |
+| `collections.lockAfter` | `0` (minutes) | `--collection-lock-after` |
+| `collections.lockOnScreenLock` | `false` | `--collection-lock-on-screen-lock` |
 | `vault.lockAfter` | `15` (minutes) | `--vault-lock-after` |
 | `vault.syncInterval` | `30` (minutes) | `--vault-sync-interval` |
 | `vault.collectionFolder` | `""` | `--vault-collection-folder` |

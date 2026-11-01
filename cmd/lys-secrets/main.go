@@ -8,7 +8,8 @@
 // own, apart from the shell, so the code holding unlocked keys is only
 // this.
 //
-//	lys-secrets [--unlock-fd N] [--vault-lock-after D] [--vault-sync-interval D]
+//	lys-secrets [--unlock-fd N] [--collection-lock-after D] [--collection-lock-on-screen-lock]
+//	            [--vault-lock-after D] [--vault-sync-interval D] [--vault-collection-folder NAME]
 //
 // The login collection unlocks with the password the user logs in or
 // unlocks the session with: the login screen writes it to an inherited
@@ -40,6 +41,7 @@ import (
 	"github.com/stubbedev/lys-secrets/internal/bitwarden"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
 	"github.com/stubbedev/lys-secrets/internal/prompt"
+	"github.com/stubbedev/lys-secrets/internal/screenlock"
 	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/vault"
 )
@@ -47,37 +49,48 @@ import (
 // vaultDevice is the name the Bitwarden account's device list shows.
 const vaultDevice = "lys-secrets"
 
+// options are the command line's settings.
+type options struct {
+	unlockFD            int
+	vault               bitwarden.Policy
+	vaultFolder         string
+	collectionLockAfter time.Duration
+	lockOnScreenLock    bool
+}
+
 func main() {
-	unlockFD := flag.Int("unlock-fd", -1, "read the login password from this inherited descriptor and unlock the login collection with it")
-	var policy bitwarden.Policy
-	flag.DurationVar(&policy.LockAfter, "vault-lock-after", 15*time.Minute, "lock the Bitwarden vault after it went unused this long; 0 keeps it open until locked")
-	flag.DurationVar(&policy.SyncInterval, "vault-sync-interval", 30*time.Minute, "sync the open Bitwarden vault this often; 0 syncs only on unlock and when asked")
-	collectionFolder := flag.String("vault-collection-folder", "", "show the logins of this Bitwarden folder as the Secret Service's \"bitwarden\" collection; empty shows none")
+	var o options
+	flag.IntVar(&o.unlockFD, "unlock-fd", -1, "read the login password from this inherited descriptor and unlock the login collection with it")
+	flag.DurationVar(&o.collectionLockAfter, "collection-lock-after", 0, "lock a collection after no secret was read from it and nothing in it changed for this long; 0 keeps it open until locked")
+	flag.BoolVar(&o.lockOnScreenLock, "collection-lock-on-screen-lock", false, "lock every collection when logind says the session locked")
+	flag.DurationVar(&o.vault.LockAfter, "vault-lock-after", 15*time.Minute, "lock the Bitwarden vault after it went unused this long; 0 keeps it open until locked")
+	flag.DurationVar(&o.vault.SyncInterval, "vault-sync-interval", 30*time.Minute, "sync the open Bitwarden vault this often; 0 syncs only on unlock and when asked")
+	flag.StringVar(&o.vaultFolder, "vault-collection-folder", "", "show the logins of this Bitwarden folder as the Secret Service's \"bitwarden\" collection; empty shows none")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "lys-secrets: unexpected argument %q\n", flag.Arg(0))
 		os.Exit(2)
 	}
-	if policy.LockAfter < 0 || policy.SyncInterval < 0 {
-		fmt.Fprintf(os.Stderr, "lys-secrets: --vault-lock-after %v and --vault-sync-interval %v must not be negative\n", policy.LockAfter, policy.SyncInterval)
+	if o.vault.LockAfter < 0 || o.vault.SyncInterval < 0 || o.collectionLockAfter < 0 {
+		fmt.Fprintf(os.Stderr, "lys-secrets: --collection-lock-after %v, --vault-lock-after %v and --vault-sync-interval %v must not be negative\n", o.collectionLockAfter, o.vault.LockAfter, o.vault.SyncInterval)
 		os.Exit(2)
 	}
-	if err := run(*unlockFD, policy, *collectionFolder); err != nil {
+	if err := run(o); err != nil {
 		fmt.Fprintln(os.Stderr, "lys-secrets:", err)
 		os.Exit(1)
 	}
 }
 
-func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
+func run(o options) error {
 	// Neither a core dump nor a same-user ptrace may read unlocked keys.
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return fmt.Errorf("make the process undumpable: %w", err)
 	}
 	var password []byte
-	if unlockFD >= 0 {
-		f := os.NewFile(uintptr(unlockFD), "unlock-fd")
+	if o.unlockFD >= 0 {
+		f := os.NewFile(uintptr(o.unlockFD), "unlock-fd")
 		if f == nil {
-			return fmt.Errorf("--unlock-fd %d is not a descriptor", unlockFD)
+			return fmt.Errorf("--unlock-fd %d is not a descriptor", o.unlockFD)
 		}
 		var err error
 		password, err = control.ReadPassword(f)
@@ -109,7 +122,7 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 	defer stop()
 
 	var secrets atomic.Pointer[service.Service]
-	bw, release, err := serveVault(ctx, conn, filepath.Join(state, "bitwarden"), policy, func() {
+	bw, release, err := serveVault(ctx, conn, filepath.Join(state, "bitwarden"), o.vault, func() {
 		if svc := secrets.Load(); svc != nil {
 			svc.VaultChanged()
 		}
@@ -128,7 +141,8 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 
 	svc, err := service.Start(conn, service.Config{
 		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Prompter: prompt.New(conn),
-		Vault: vaultCollection{bw: bw, folder: collectionFolder},
+		Vault:     vaultCollection{bw: bw, folder: o.vaultFolder},
+		LockAfter: o.collectionLockAfter,
 	})
 	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string
@@ -150,6 +164,10 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 		clear(password)
 	}
 
+	if o.lockOnScreenLock {
+		go lockOnScreenLock(ctx, svc)
+	}
+
 	ln, err := control.Listen(sock)
 	if err != nil {
 		return err
@@ -157,6 +175,23 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 	log.Printf("lys-secrets: serving %s and %s, unlock socket %s", service.BusName, vault.ServiceName, sock)
 	control.Serve(ctx, ln, svc)
 	return nil
+}
+
+// lockOnScreenLock locks svc's collections each time the session locks,
+// until ctx ends. Not being able to watch does not stop the service, whose
+// secrets every app needs, and the log says what it means.
+func lockOnScreenLock(ctx context.Context, svc *service.Service) {
+	conn, err := dbus.ConnectSystemBus()
+	if err == nil {
+		defer func() { _ = conn.Close() }()
+		err = screenlock.Watch(ctx, conn, func() {
+			svc.LockCollections()
+			log.Print("lys-secrets: the session locked, so every collection did")
+		})
+	}
+	if err != nil {
+		log.Printf("lys-secrets: collections will NOT lock with the screen, despite --collection-lock-on-screen-lock: %v", err)
+	}
 }
 
 // serveVault opens the Bitwarden vault whose session lives in dir and

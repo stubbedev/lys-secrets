@@ -2,13 +2,17 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/control"
@@ -376,5 +380,157 @@ func TestUnlockingLetsTheAliasMove(t *testing.T) {
 	}
 	if got := readDefaultAlias(t, conn); got != noPrompt {
 		t.Errorf("default = %s after removing it", got)
+	}
+}
+
+func idleFixture(t *testing.T, after time.Duration, now func() time.Time) (*fixture, *dbus.Conn, dbus.ObjectPath) {
+	t.Helper()
+	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}}
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, LockAfter: after, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Close)
+	f.svc = svc
+	if err := svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	conn := f.bus.Conn(t)
+	var item, prompt dbus.ObjectPath
+	if err := conn.Object(BusName, defaultAliasPath).Call(ifaceCollection+".CreateItem", 0, itemProps("a"), plainSecret(openSession(t, conn), "kept"), false).Store(&item, &prompt); err != nil {
+		t.Fatal(err)
+	}
+	return f, conn, item
+}
+
+func (f *fixture) loginLocked() bool {
+	f.svc.mu.Lock()
+	defer f.svc.mu.Unlock()
+	return f.svc.colls[LoginID].kr.Locked()
+}
+
+func TestIdleCollectionsLockOnlyOnceUnused(t *testing.T) {
+	const after = time.Hour
+	var mu sync.Mutex
+	clock := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	advance := func(d time.Duration) { mu.Lock(); defer mu.Unlock(); clock = clock.Add(d) }
+	f, conn, item := idleFixture(t, after, now)
+	sess := openSession(t, conn)
+
+	advance(after - time.Minute)
+	f.svc.lockIdle()
+	if f.loginLocked() {
+		t.Fatal("locked before its idle time")
+	}
+	var secret Secret
+	if err := conn.Object(BusName, item).Call(ifaceItem+".GetSecret", 0, sess).Store(&secret); err != nil {
+		t.Fatal(err)
+	}
+	advance(after - time.Minute)
+	f.svc.lockIdle()
+	if f.loginLocked() {
+		t.Fatal("reading a secret did not restart the idle clock")
+	}
+	if err := conn.Object(BusName, item).Call(ifaceItem+".SetSecret", 0, plainSecret(sess, "changed")).Err; err != nil {
+		t.Fatal(err)
+	}
+	advance(after - time.Minute)
+	f.svc.lockIdle()
+	if f.loginLocked() {
+		t.Fatal("a change did not restart the idle clock")
+	}
+	var found []dbus.ObjectPath
+	if err := conn.Object(BusName, collectionPath(LoginID)).Call(ifaceCollection+".SearchItems", 0, map[string]string{"k": "v"}).Store(&found); err != nil {
+		t.Fatal(err)
+	}
+	advance(time.Minute)
+	f.svc.lockIdle()
+	if !f.loginLocked() {
+		t.Fatal("a search restarted the idle clock, or the collection did not lock")
+	}
+	f.svc.mu.Lock()
+	pending := f.svc.idle
+	f.svc.mu.Unlock()
+	if pending != nil {
+		t.Error("a check stays pending with every collection locked")
+	}
+
+	if err := f.svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.lockIdle()
+	if f.loginLocked() {
+		t.Error("unlocking did not restart the idle clock")
+	}
+}
+
+func TestAnIdleCollectionLocksByItself(t *testing.T) {
+	f, conn, item := idleFixture(t, 50*time.Millisecond, nil)
+	deadline := time.Now().Add(10 * time.Second)
+	for !f.loginLocked() {
+		if time.Now().After(deadline) {
+			t.Fatal("the idle collection never locked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var secret Secret
+	err := conn.Object(BusName, item).Call(ifaceItem+".GetSecret", 0, openSession(t, conn)).Store(&secret)
+	requireDBusError(t, "GetSecret", err, errIsLocked)
+}
+
+func TestANewEmptyCollectionLocksWhenIdleToo(t *testing.T) {
+	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}}
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, LockAfter: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Close)
+	f.svc = svc
+	if err := svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !f.loginLocked() {
+		if time.Now().After(deadline) {
+			t.Fatal("the new collection never locked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestNoIdleLockByDefault(t *testing.T) {
+	var mu sync.Mutex
+	clock := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	f, _, _ := idleFixture(t, 0, now)
+	f.svc.mu.Lock()
+	pending := f.svc.idle
+	f.svc.mu.Unlock()
+	if pending != nil {
+		t.Error("a check is pending with no idle time set")
+	}
+	mu.Lock()
+	clock = clock.Add(24 * 365 * time.Hour)
+	mu.Unlock()
+	if f.loginLocked() {
+		t.Error("the collection locked with no idle time set")
+	}
+}
+
+func TestLockCollectionsLeavesTheVaultOpen(t *testing.T) {
+	f, v := vaultFixture(t)
+	if err := f.svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Unlock(context.Background(), "master"); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.LockCollections()
+	if !f.loginLocked() {
+		t.Error("the collection stayed unlocked")
+	}
+	if _, open := v.Logins(); !open {
+		t.Error("the vault locked")
 	}
 }

@@ -82,7 +82,9 @@ Where this stops:
   are not cleared. Neither is a password returned by the dialog, which arrives as a
   Go string.
 - An unlocked collection [stays unlocked](/guide/how-it-works#locking) until
-  something locks it, including while the screen is locked.
+  something locks it, including while the screen is locked, unless you turn on its
+  idle lock or its lock with the screen. Locking does not stop what a client read
+  before it.
 
 ## On the bus
 

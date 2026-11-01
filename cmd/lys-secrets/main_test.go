@@ -21,6 +21,7 @@ import (
 	"github.com/stubbedev/lys-lib/xdg"
 
 	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
@@ -247,5 +248,103 @@ func TestAnotherProviderKeepsTheName(t *testing.T) {
 	}
 	if first.cmd.ProcessState != nil {
 		t.Error("the first instance died")
+	}
+}
+
+type fakeLogind struct{}
+
+func (fakeLogind) GetSession(string) (dbus.ObjectPath, *dbus.Error) {
+	return "/org/freedesktop/login1/session/_1", nil
+}
+
+func loginLocked(t *testing.T) bool {
+	t.Helper()
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	v, err := conn.Object(service.BusName, "/org/freedesktop/secrets/collection/login").GetProperty("org.freedesktop.Secret.Collection.Locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, ok := v.Value().(bool)
+	if !ok {
+		t.Fatalf("Locked is %v", v)
+	}
+	return locked
+}
+
+func TestCollectionsLockWithTheScreen(t *testing.T) {
+	setup(t)
+	system := dbustest.Start(t)
+	system.UseAsSystemBus(t)
+	owner := system.Conn(t)
+	if err := owner.Export(fakeLogind{}, "/org/freedesktop/login1", "org.freedesktop.login1.Manager"); err != nil {
+		t.Fatal(err)
+	}
+	if reply, err := owner.RequestName("org.freedesktop.login1", dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
+		t.Fatalf("own logind's name on the private bus: %v, %v", reply, err)
+	}
+
+	d := start(t, "login-pw", "--collection-lock-on-screen-lock")
+	d.waitLog(t, "serving org.freedesktop.secrets")
+	if loginLocked(t) {
+		t.Fatal("locked before the screen did")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !loginLocked(t) {
+		if time.Now().After(deadline) {
+			t.Fatal("the collection did not lock with the screen")
+		}
+		if err := owner.Emit("/org/freedesktop/login1/session/_1", "org.freedesktop.login1.Session.Lock"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	sock, err := control.SocketPath(xdg.OS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.Unlock(sock, []byte("login-pw")); err != nil {
+		t.Errorf("the unlocking lock screen's password = %v", err)
+	}
+	if loginLocked(t) {
+		t.Error("the lock screen's password did not reopen the collection")
+	}
+}
+
+func TestWithoutLogindTheServiceKeepsServingAndSaysSo(t *testing.T) {
+	setup(t)
+	system := dbustest.Start(t)
+	system.UseAsSystemBus(t)
+	d := start(t, "", "--collection-lock-on-screen-lock")
+	d.waitLog(t, "NOT lock with the screen")
+	sock, err := control.SocketPath(xdg.OS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := control.Unlock(sock, []byte("login-pw"))
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the service does not answer: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestANegativeCollectionLockAfterIsRefused(t *testing.T) {
+	setup(t)
+	cmd := exec.Command(os.Args[0], "--collection-lock-after=-1s")
+	cmd.Env = append(os.Environ(), "LYS_SECRETS_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), "--collection-lock-after") {
+		t.Errorf("exit %v, output %q", err, out)
 	}
 }

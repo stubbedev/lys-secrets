@@ -66,8 +66,11 @@ twice.
 ## Locking
 
 A collection locks when a client calls the API's `Lock` or `LockService`, or when
-the process stops. There is no idle timer for collections, and lys-secrets does
-not watch the session's lock state, so locking your screen does not lock them.
+the process stops. By default that is all: there is no idle time, and locking your
+screen does not lock collections. Two settings add both, each off by default:
+[`--collection-lock-after` and `--collection-lock-on-screen-lock`](/guide/configuration#command-line-flags).
+The idle time restarts when a secret is read or anything in the collection changes.
+Listing and searching do not restart it.
 
 `Lock` on the `bitwarden` collection locks the vault. `LockService` locks every
 collection and the vault, whether or not the vault shows as a collection.

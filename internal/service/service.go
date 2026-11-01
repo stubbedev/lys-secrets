@@ -55,6 +55,10 @@ const (
 // alias points at it unless set otherwise.
 const LoginID = "login"
 
+// idleCheckEvery bounds how late Config.LockAfter acts after a suspend,
+// which timers do not count and the wall clock does.
+const idleCheckEvery = 30 * time.Second
+
 // Secret is the API's Secret struct, (oayays).
 type Secret struct {
 	Session     dbus.ObjectPath
@@ -86,6 +90,9 @@ type Config struct {
 	// Vault, when set, locks with LockService, and shows as a collection
 	// if it says so.
 	Vault Vault
+	// LockAfter locks a collection once no secret was read from it and
+	// nothing in it changed for this long; 0 never does.
+	LockAfter time.Duration
 }
 
 // Service is a running Secret Service.
@@ -108,6 +115,9 @@ type Service struct {
 	stops []func()
 	// vault is the vault collection, nil unless Config.Vault shows as one.
 	vault *vaultColl
+	// idle is the pending check of Config.LockAfter, nil with no collection
+	// unlocked.
+	idle *time.Timer
 }
 
 type collection struct {
@@ -115,6 +125,9 @@ type collection struct {
 	kr    *keyring.Collection
 	off   func()
 	items map[uint32]func()
+	// lastUse is when a secret was last read or anything changed, in wall
+	// clock time, kept only under Config.LockAfter.
+	lastUse time.Time
 }
 
 // unexport takes the collection and its items off the connection.
@@ -257,6 +270,10 @@ func (s *Service) Close() {
 		return
 	}
 	s.closed = true
+	if s.idle != nil {
+		s.idle.Stop()
+		s.idle = nil
+	}
 	for _, c := range s.colls {
 		c.kr.Destroy()
 	}
@@ -311,18 +328,76 @@ func (s *Service) unlockLocked(c *collection, password []byte) error {
 			log.Printf("secrets: rewrite collection %s in the current format: %v", c.id, err)
 		}
 	}
+	s.usedLocked(c)
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 	return nil
+}
+
+// usedLocked restarts c's idle clock and makes sure a check is pending.
+func (s *Service) usedLocked(c *collection) {
+	if s.cfg.LockAfter == 0 {
+		return
+	}
+	c.lastUse = s.now().Round(0)
+	s.armIdleLocked()
+}
+
+// armIdleLocked schedules the next idle check when one is due and none is
+// pending, leaving nothing to wake up for with every collection locked.
+func (s *Service) armIdleLocked() {
+	if s.idle != nil || s.closed {
+		return
+	}
+	if wait, ok := s.nextIdleCheckLocked(s.now().Round(0)); ok {
+		s.idle = time.AfterFunc(wait, s.lockIdle)
+	}
+}
+
+// nextIdleCheckLocked is how long until the unlocked collection closest to
+// its idle time gets there, capped at idleCheckEvery; false with none
+// unlocked.
+func (s *Service) nextIdleCheckLocked(now time.Time) (time.Duration, bool) {
+	wait, unlocked := idleCheckEvery, false
+	for _, c := range s.colls {
+		if !c.kr.Locked() {
+			unlocked = true
+			wait = min(wait, max(c.lastUse.Add(s.cfg.LockAfter).Sub(now), 0))
+		}
+	}
+	return wait, unlocked
+}
+
+// lockIdle locks the collections past their idle time and schedules the
+// next check.
+func (s *Service) lockIdle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idle = nil
+	if s.closed {
+		return
+	}
+	now := s.now().Round(0)
+	for _, c := range s.colls {
+		if !c.kr.Locked() && !now.Before(c.lastUse.Add(s.cfg.LockAfter)) {
+			s.lockCollectionLocked(c)
+		}
+	}
+	s.armIdleLocked()
+}
+
+// LockCollections locks every collection, leaving the vault as it is.
+func (s *Service) LockCollections() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.colls {
+		s.lockCollectionLocked(c)
+	}
 }
 
 // Lock locks every collection and the vault, whether or not the vault
 // shows as a collection.
 func (s *Service) Lock() {
-	s.mu.Lock()
-	for _, c := range s.colls {
-		s.lockCollectionLocked(c)
-	}
-	s.mu.Unlock()
+	s.LockCollections()
 	if s.cfg.Vault != nil {
 		s.cfg.Vault.Lock()
 	}
@@ -400,6 +475,7 @@ func (s *Service) saveLocked(c *collection) error {
 	if err := s.disk.save(c.id, data); err != nil {
 		return fmt.Errorf("save collection %s: %w", c.id, err)
 	}
+	s.usedLocked(c)
 	return nil
 }
 
@@ -409,6 +485,7 @@ func (s *Service) addCollectionLocked(id string, kr *keyring.Collection) error {
 		return err
 	}
 	s.colls[id] = c
+	s.usedLocked(c)
 	if err := s.exportCollectionLocked(c); err != nil {
 		return err
 	}
@@ -650,6 +727,7 @@ func (s *Service) secretLocked(c *collection, id uint32, sessPath dbus.ObjectPat
 		return Secret{}, lockedErr(err)
 	}
 	defer clear(value)
+	s.usedLocked(c)
 	it, _ := c.kr.Item(id)
 	params, enc, err := sess.t.encode(value)
 	if err != nil {

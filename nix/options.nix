@@ -15,6 +15,27 @@ self: {
     secrets component as well (lys-secrets logs the other owner and serves
     the vault alone)'';
 
+  collections = {
+    lockAfter = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 0;
+      description = ''
+        Lock a collection after this many minutes with no secret read from it
+        and nothing in it changed. 0 keeps it open until something locks it.
+      '';
+    };
+    lockOnScreenLock = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Lock every collection when logind says the session locked. lys-login's
+        lock screen reopens the login collection as it unlocks; other collections
+        ask for their password when next used. The Bitwarden vault keeps to
+        `vault.lockAfter`.
+      '';
+    };
+  };
+
   vault = {
     lockAfter = lib.mkOption {
       type = lib.types.ints.unsigned;

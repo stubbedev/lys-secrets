@@ -13,7 +13,7 @@ in {
   config = lib.mkIf cfg.enable {
     # The activation files clients start lys-secrets through, handing them
     # to the packaged user unit, which every graphical session also starts,
-    # its command line carrying the vault policy.
+    # its command line carrying the settings.
     xdg.dataFile = lib.genAttrs activations (path: {source = "${cfg.package}/share/${path}";});
     xdg.configFile = {
       "systemd/user/lys-secrets.service".source = unit;
