@@ -36,8 +36,9 @@ type Host interface {
 	// Lock wipes the keys and the plaintext; the session stays.
 	Lock()
 	// Logout locks, forgets the session here, and asks the server to
-	// revoke it. The session is gone here whatever the server does; a
-	// server that could not revoke it is ErrSessionNotRevoked.
+	// revoke it. The session is gone here whatever the server does. A
+	// server with no way to revoke it is ErrRevocationUnsupported, and an
+	// attempt that failed is ErrSessionNotRevoked.
 	Logout(ctx context.Context) error
 	// Sync refetches the open vault.
 	Sync(ctx context.Context) error

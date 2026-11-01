@@ -215,9 +215,9 @@ func (c *Client) Refresh(ctx context.Context, refreshToken, loginClientID string
 }
 
 // Revoke asks the server to revoke refreshToken (RFC 7009). The token
-// endpoint's client id needs no secret for a first-party client. An
-// answer other than 200 is an APIError, 404 from a server with no such
-// endpoint among them.
+// endpoint's client id needs no secret for a first-party client. A server
+// saying it cannot is vault.ErrRevocationUnsupported; any other answer but
+// 200 is an APIError.
 func (c *Client) Revoke(ctx context.Context, refreshToken, loginClientID string) error {
 	form := url.Values{}
 	form.Set("token", refreshToken)
@@ -235,10 +235,31 @@ func (c *Client) Revoke(ctx context.Context, refreshToken, loginClientID string)
 	if err != nil {
 		return err
 	}
-	if status != http.StatusOK {
-		return apiError("revoke the session", status, errorMessage(raw))
+	if status == http.StatusOK {
+		return nil
 	}
-	return nil
+	answer := apiError("revoke the session", status, errorMessage(raw))
+	if revocationUnsupported(status, raw) {
+		return fmt.Errorf("%w: %w", vault.ErrRevocationUnsupported, answer)
+	}
+	return answer
+}
+
+// revocationUnsupported reports an answer meaning the server has no
+// revocation to offer, as opposed to one that failed: no such endpoint or
+// method, or RFC 7009's unsupported_token_type. Bitwarden's server disables
+// the endpoint and Vaultwarden has no such route.
+func revocationUnsupported(status int, raw []byte) bool {
+	switch status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	case http.StatusBadRequest:
+		var body struct {
+			Error string `json:"error"`
+		}
+		return json.Unmarshal(raw, &body) == nil && body.Error == "unsupported_token_type"
+	}
+	return false
 }
 
 func (c *Client) tokenForm() url.Values {

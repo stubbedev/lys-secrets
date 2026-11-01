@@ -114,8 +114,10 @@ const (
 )
 
 // Logout locks, forgets the session here, and asks the server to revoke
-// it. An error matching ErrSessionNotRevoked means the first two happened
-// and the server may still accept the old refresh token.
+// it. An error matching ErrRevocationUnsupported is a completed logout on
+// a server that cannot revoke, so its refresh token stays valid until it
+// expires or the account's sessions are deauthorized. One matching
+// ErrSessionNotRevoked means revoking was tried and failed.
 func (c *Client) Logout(ctx context.Context) error { return c.do(ctx, "Logout") }
 
 // Sync refetches the open vault.

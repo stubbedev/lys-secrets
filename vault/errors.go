@@ -23,7 +23,11 @@ var (
 	ErrRepromptRequired      = errors.New("vault: the item asks for the master password")
 	ErrUnreachable           = errors.New("vault: the server is unreachable")
 	ErrInsecureServer        = errors.New("vault: the password hash and tokens would travel unencrypted")
-	ErrSessionNotRevoked     = errors.New("vault: logged out here, but the server did not revoke the session, so its refresh token may still work; deauthorize sessions from the account's web vault if it may have leaked")
+	ErrSessionNotRevoked     = errors.New("vault: logged out here, but revoking the session on the server failed, so its refresh token may still work; deauthorize the account's sessions if it may have leaked")
+	// ErrRevocationUnsupported is a logout that did all it can: the session
+	// is gone here and the server has no way to revoke it. A caller shows
+	// it as a completed logout, not as a failure.
+	ErrRevocationUnsupported = errors.New("vault: logged out here; this server cannot revoke a session, so its refresh token stays valid until it expires or the account's sessions are deauthorized")
 	ErrAccessDenied          = errors.New("vault: only the vault's own user may use it")
 	ErrInvalidInput          = errors.New("vault: invalid input")
 	ErrNoSuchFolder          = errors.New("vault: no such folder")
@@ -61,10 +65,11 @@ func (e *ServerError) Retryable() bool {
 }
 
 const (
-	errPrefix            = iface + ".Error."
-	errTwoFactorRequired = errPrefix + "TwoFactorRequired"
-	errServer            = errPrefix + "Server"
-	errSessionNotRevoked = errPrefix + "SessionNotRevoked"
+	errPrefix                = iface + ".Error."
+	errTwoFactorRequired     = errPrefix + "TwoFactorRequired"
+	errServer                = errPrefix + "Server"
+	errSessionNotRevoked     = errPrefix + "SessionNotRevoked"
+	errRevocationUnsupported = errPrefix + "RevocationUnsupported"
 )
 
 // sentinels names each sentinel error on the bus.
@@ -82,6 +87,7 @@ var sentinels = []struct {
 	{errPrefix + "RepromptRequired", ErrRepromptRequired},
 	{errPrefix + "InsecureServer", ErrInsecureServer},
 	{errSessionNotRevoked, ErrSessionNotRevoked},
+	{errRevocationUnsupported, ErrRevocationUnsupported},
 	{errPrefix + "Unreachable", ErrUnreachable},
 	{errPrefix + "AccessDenied", ErrAccessDenied},
 	{errPrefix + "InvalidInput", ErrInvalidInput},
@@ -94,6 +100,9 @@ var sentinels = []struct {
 // encodeError is err as the bus carries it: a contract error under its
 // name, its message first in the body; anything else Failed.
 func encodeError(err error) *dbus.Error {
+	if errors.Is(err, ErrRevocationUnsupported) {
+		return dbus.NewError(errRevocationUnsupported, []any{err.Error()})
+	}
 	if errors.Is(err, ErrSessionNotRevoked) {
 		return dbus.NewError(errSessionNotRevoked, []any{err.Error()})
 	}

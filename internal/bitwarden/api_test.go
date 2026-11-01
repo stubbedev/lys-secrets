@@ -300,3 +300,39 @@ func TestRedirectsStayLimited(t *testing.T) {
 		t.Errorf("Prelogin = %v, want the redirect limit", err)
 	}
 }
+
+func TestRevokeTellsAnUnsupportedServerFromAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		body        string
+		ok          bool
+		unsupported bool
+	}{
+		{name: "revoked", status: http.StatusOK, ok: true},
+		{name: "no endpoint", status: http.StatusNotFound, unsupported: true},
+		{name: "no such method", status: http.StatusMethodNotAllowed, unsupported: true},
+		{name: "not implemented", status: http.StatusNotImplemented, unsupported: true},
+		{name: "token type unsupported", status: http.StatusBadRequest, body: `{"error":"unsupported_token_type"}`, unsupported: true},
+		{name: "another bad request", status: http.StatusBadRequest, body: `{"error":"invalid_request"}`},
+		{name: "unreadable bad request", status: http.StatusBadRequest, body: `<html>`},
+		{name: "client refused", status: http.StatusUnauthorized, body: `{"error":"invalid_client"}`},
+		{name: "server down", status: http.StatusServiceUnavailable},
+		{name: "server error", status: http.StatusInternalServerError},
+		{name: "gateway", status: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeServer(t, map[string]http.HandlerFunc{"/identity/connect/revocation": reply(tc.status, tc.body)})
+			err := testClient(f).Revoke(t.Context(), "rt", clientID)
+			if tc.ok {
+				if err != nil {
+					t.Errorf("Revoke = %v", err)
+				}
+				return
+			}
+			if err == nil || errors.Is(err, vault.ErrRevocationUnsupported) != tc.unsupported {
+				t.Errorf("Revoke = %v, want unsupported %v", err, tc.unsupported)
+			}
+		})
+	}
+}

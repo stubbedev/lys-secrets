@@ -450,21 +450,80 @@ func requireLoggedOut(t *testing.T, s *counted, dir string) {
 	}
 }
 
-func TestLogoutThatTheServerRefusesIsReported(t *testing.T) {
+// A server with no revocation endpoint is a logout that did all it can: a
+// distinct result, no error left in the status, and one log line however
+// many logouts there are.
+func TestLogoutOnAServerWithNoRevocationIsItsOwnResult(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
 	s := openService(t, dir)
+	var logged []string
+	s.logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	for range 2 {
+		if err := s.Login(context.Background(), login(a)); err != nil {
+			t.Fatal(err)
+		}
+		err := s.Logout(context.Background())
+		var server *vault.ServerError
+		if !errors.Is(err, vault.ErrRevocationUnsupported) || errors.Is(err, vault.ErrSessionNotRevoked) || !errors.As(err, &server) || server.Status != http.StatusNotFound {
+			t.Errorf("Logout = %v, want only ErrRevocationUnsupported, with its 404", err)
+		}
+		if st := s.Status(); st.State != vault.StateLoggedOut || st.Err != nil {
+			t.Errorf("status = %+v, want logged out with no error", st)
+		}
+		if _, err := os.Stat(filepath.Join(dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the session file: %v, want it gone", err)
+		}
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %q, want one line", logged)
+	}
+	for _, want := range []string{a.srv.URL, "stays valid", "deauthorized", "404"} {
+		if !strings.Contains(logged[0], want) {
+			t.Errorf("%q does not say %q", logged[0], want)
+		}
+	}
+}
+
+func TestAFailedRevocationStaysAnErrorInTheStatus(t *testing.T) {
+	a := newAccount(t)
+	a.revocable(http.StatusServiceUnavailable)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	s.logf = func(string, ...any) { t.Error("logged a failed attempt as an unsupported server") }
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
 	err := s.Logout(context.Background())
-	var server *vault.ServerError
-	if !errors.Is(err, vault.ErrSessionNotRevoked) || !errors.As(err, &server) || server.Status != http.StatusNotFound {
-		t.Errorf("Logout on a server with no revocation = %v, want ErrSessionNotRevoked with its 404", err)
+	if !errors.Is(err, vault.ErrSessionNotRevoked) || errors.Is(err, vault.ErrRevocationUnsupported) {
+		t.Errorf("Logout = %v, want only ErrSessionNotRevoked", err)
 	}
-	requireLoggedOut(t, s, dir)
 	if !errors.Is(s.Status().Err, vault.ErrSessionNotRevoked) {
 		t.Errorf("status error = %v", s.Status().Err)
+	}
+	requireLoggedOut(t, s, dir)
+}
+
+func TestAFailedRemovalIsNotHiddenByAServerThatCannotRevoke(t *testing.T) {
+	a := newAccount(t)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	s.logf = func(string, ...any) {}
+	if err := s.Login(context.Background(), login(a)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, sessionFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, sessionFile), privateDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionFile, "x"), nil, privateFileMode); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Logout(context.Background())
+	if err == nil || errors.Is(err, vault.ErrRevocationUnsupported) {
+		t.Errorf("Logout = %v, want the removal's failure and not a completed logout", err)
 	}
 }
 

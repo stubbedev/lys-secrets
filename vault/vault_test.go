@@ -688,9 +688,35 @@ func TestFolderScope(t *testing.T) {
 	}
 }
 
+func TestLogoutOnAServerThatCannotRevokeIsItsOwnResult(t *testing.T) {
+	host := &fakeHost{logoutErr: fmt.Errorf("%w: %w", ErrRevocationUnsupported, &ServerError{Status: 404})}
+	_, c, _ := serve(t, host)
+	err := c.Logout(ctx(t))
+	if !errors.Is(err, ErrRevocationUnsupported) || errors.Is(err, ErrSessionNotRevoked) {
+		t.Errorf("Logout = %v, want only ErrRevocationUnsupported", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "stays valid") {
+		t.Errorf("Logout = %v, want it to say the token stays valid", err)
+	}
+}
+
+func TestServerRedactedHidesAPassword(t *testing.T) {
+	s, err := ParseServer("https://user:hunter2@vault.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Redacted(); strings.Contains(got, "hunter2") || !strings.Contains(got, "vault.example.com") {
+		t.Errorf("Redacted = %q", got)
+	}
+	cloud, _ := ParseServer(CloudUS)
+	if got := cloud.Redacted(); got != CloudUS {
+		t.Errorf("Redacted = %q, want %q", got, CloudUS)
+	}
+}
+
 func TestLogoutReportsASessionTheServerDidNotRevoke(t *testing.T) {
 	for _, cause := range []error{
-		&ServerError{Status: 404, Message: "not found"},
+		&ServerError{Status: 503, Message: "maintenance"},
 		fmt.Errorf("%w: connection refused", ErrUnreachable),
 	} {
 		host := &fakeHost{logoutErr: fmt.Errorf("%w: %w", ErrSessionNotRevoked, cause)}

@@ -158,15 +158,28 @@ against the server, to get a token and your vault as the server stores it, still
 encrypted under your master password.
 
 `Logout` deletes the file first, then asks the server to revoke the refresh token
-through OAuth's revocation endpoint (RFC 7009). The file goes even with the server
-unreachable, and a server that did not revoke the token makes `Logout` fail with
-`SessionNotRevoked`, saying why. **Bitwarden's and Vaultwarden's servers have no
-such endpoint today**, so expect that answer from them: the old token keeps working.
-They invalidate a session only with every other one on the account, which is
-Bitwarden's "Deauthorize sessions" and needs your master password. Do that if the
-file may have leaked. lys-secrets does not do it for you, since it would log out
-your other devices too. A session from a personal API key has no refresh token to
-revoke; its access token stops working when it expires.
+through OAuth's revocation endpoint (RFC 7009). The file goes whatever the server
+answers.
+
+**On Bitwarden's and Vaultwarden's servers, logging out does not end the session on
+the server.** They have no revocation endpoint today, so the refresh token stays
+valid until it expires or the account's sessions are deauthorized. A copy of
+`session.json` taken earlier keeps working until then. lys-secrets logs this once
+and answers `RevocationUnsupported`, which is the expected result on these servers,
+not a failure.
+
+To end it, deauthorize the account's sessions, which is "Deauthorize sessions" on
+Bitwarden. Do that if the file may have leaked. It needs your master password and
+logs out every device on the account, so lys-secrets never does it for you.
+
+| What the server answers | What `Logout` returns |
+| --- | --- |
+| 200 | Success: the token is revoked |
+| 404, 405, 501, or `unsupported_token_type` | `RevocationUnsupported`: the server has no way to revoke it |
+| Anything else, or no answer | `SessionNotRevoked`, saying why: revocation was tried and failed, so the token may still work |
+
+A session from a personal API key has no refresh token to revoke; its access token
+stops working when it expires.
 
 **In memory**, unlike a collection's key, the vault's keys and decrypted items are
 on the Go heap, with no lock against swap. They are excluded from core dumps only by

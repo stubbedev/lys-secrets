@@ -66,6 +66,9 @@ type Service struct {
 	keepWake chan struct{}
 	// wakeCheck bounds how long Keep sleeps toward a deadline.
 	wakeCheck time.Duration
+	// logf and revokeLog log a server that cannot revoke once per process.
+	logf      func(format string, args ...any)
+	revokeLog sync.Once
 }
 
 // wakeCheckEvery bounds how late Keep acts after a suspend, which its
@@ -88,7 +91,7 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery}
+	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery, logf: log.Printf}
 	sess, err := loadSession(filepath.Join(dir, sessionFile))
 	if errors.Is(err, vault.ErrInsecureServer) {
 		return s.forgetInsecureSession(err)
@@ -735,7 +738,9 @@ func (s *Service) verifyPassword(password string) error {
 
 // Logout locks and forgets the session here first, then asks the server
 // to revoke its refresh token, so a server that does not answer never
-// keeps a session here. A server that did not revoke it is
+// keeps a session here. A server with no way to revoke is logged once and
+// returned as vault.ErrRevocationUnsupported, with no error in the status,
+// since that logout did all it can. An attempt that failed is
 // vault.ErrSessionNotRevoked, in the status as well. A session without a
 // refresh token (an API key login) has nothing to revoke. It waits for a
 // running operation, which may rotate the token or save the session.
@@ -743,16 +748,33 @@ func (s *Service) Logout(ctx context.Context) error {
 	s.op.Lock()
 	defer s.op.Unlock()
 	sess := s.session()
-	err := s.logout()
-	if sess != nil && sess.RefreshToken != "" {
-		if revokeErr := s.newClient(sess.Server, s.device).Revoke(ctx, sess.RefreshToken, sess.ClientID); revokeErr != nil {
-			err = errors.Join(err, fmt.Errorf("%w: %w", vault.ErrSessionNotRevoked, revokeErr))
+	removeErr := s.logout()
+	revokeErr := s.revoke(ctx, sess)
+	if errors.Is(revokeErr, vault.ErrRevocationUnsupported) {
+		s.revokeLog.Do(func() {
+			s.logf("bitwarden: %s cannot revoke a session, so the refresh token of each logout stays valid until it expires or the account's sessions are deauthorized: %v", sess.Server.Redacted(), revokeErr)
+		})
+		if removeErr == nil {
+			return revokeErr
 		}
+		revokeErr = nil
 	}
-	if err != nil {
+	if err := errors.Join(removeErr, revokeErr); err != nil {
 		return s.fail(err)
 	}
 	return nil
+}
+
+// revoke asks sess's server to revoke its refresh token, if it has one.
+func (s *Service) revoke(ctx context.Context, sess *session) error {
+	if sess == nil || sess.RefreshToken == "" {
+		return nil
+	}
+	err := s.newClient(sess.Server, s.device).Revoke(ctx, sess.RefreshToken, sess.ClientID)
+	if err == nil || errors.Is(err, vault.ErrRevocationUnsupported) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", vault.ErrSessionNotRevoked, err)
 }
 
 // logout locks and forgets the session here. The caller holds op.

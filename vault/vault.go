@@ -208,6 +208,15 @@ func isLoopback(host string) bool {
 // String is the cloud's name or the base URL.
 func (s Server) String() string { return s.s }
 
+// Redacted is String with any password in the URL masked, for a log.
+func (s Server) Redacted() string {
+	u, err := url.Parse(s.s)
+	if err != nil {
+		return "the configured server"
+	}
+	return u.Redacted()
+}
+
 // MarshalText implements encoding.TextMarshaler.
 func (s Server) MarshalText() ([]byte, error) { return []byte(s.s), nil }
 
