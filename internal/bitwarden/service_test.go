@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -738,5 +739,28 @@ func TestSendRefusals(t *testing.T) {
 	}
 	if err := s.DeleteSend(ctx, "s1"); !errors.Is(err, vault.ErrLocked) {
 		t.Errorf("delete locked = %v", err)
+	}
+}
+
+func TestASessionForAPlainHTTPServerStartsLoggedOut(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, sessionFile)
+	saved := `{"Server":"http://vault.example.com","Email":"ada@example.com","RefreshToken":"rt","ClientID":"desktop"}`
+	if err := os.WriteFile(path, []byte(saved), privateFileMode); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, "test", func() {})
+	if err != nil {
+		t.Fatalf("Open = %v, want a vault that starts", err)
+	}
+	st := s.Status()
+	if st.State != vault.StateLoggedOut || !errors.Is(st.Err, vault.ErrInsecureServer) {
+		t.Errorf("status = %+v, want logged out with ErrInsecureServer", st)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the session file: %v, want it gone", err)
+	}
+	if s.session() != nil {
+		t.Error("the refused session is still held")
 	}
 }

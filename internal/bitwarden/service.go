@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -76,6 +77,9 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	}
 	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed}
 	sess, err := loadSession(filepath.Join(dir, sessionFile))
+	if errors.Is(err, vault.ErrInsecureServer) {
+		return s.forgetInsecureSession(err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +87,19 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 		s.sess = sess
 		s.status = vault.Status{State: vault.StateLocked, Email: sess.Email}
 	}
+	return s, nil
+}
+
+// forgetInsecureSession drops a session saved for a server that is now
+// refused: its refresh token will not be sent there again, and a vault
+// that cannot start must not take the Secret Service down with it. The
+// account starts logged out, with err as its status.
+func (s *Service) forgetInsecureSession(err error) (*Service, error) {
+	log.Printf("bitwarden: logged out: %v", err)
+	if rmErr := os.Remove(filepath.Join(s.dir, sessionFile)); rmErr != nil {
+		return nil, fmt.Errorf("bitwarden: remove the session of a refused server: %w", rmErr)
+	}
+	s.status = vault.Status{State: vault.StateLoggedOut, Err: err}
 	return s, nil
 }
 

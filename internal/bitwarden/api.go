@@ -50,6 +50,7 @@ const (
 	clientID          = "desktop"
 	deviceTypeLinux   = "8"
 	httpTimeout       = 30 * time.Second
+	maxRedirects      = 10
 	maxResponseBytes  = 64 << 20
 	newDeviceMessage  = "new device verification required"
 	tokenScope        = "api offline_access" //nolint:gosec // an OAuth scope, not a credential
@@ -74,7 +75,17 @@ type Client struct {
 
 // NewClient is a client for server as device.
 func NewClient(server vault.Server, device Device) *Client {
-	return &Client{server: endpointsOf(server), device: device, http: &http.Client{Timeout: httpTimeout}}
+	return &Client{server: endpointsOf(server), device: device, http: &http.Client{Timeout: httpTimeout, CheckRedirect: checkRedirect}}
+}
+
+// checkRedirect keeps net/http's limit on redirects and refuses one that
+// would downgrade the connection, since a 307 resends the password hash
+// and a same-host redirect keeps the bearer token.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	return vault.CheckTransport(req.URL)
 }
 
 // APIError is a server answer the flow does not handle: the operation
@@ -401,6 +412,9 @@ func (c *Client) postJSON(ctx context.Context, op, endpoint string, body []byte,
 
 func (c *Client) do(req *http.Request, op string) (int, []byte, error) {
 	resp, err := c.http.Do(req)
+	if errors.Is(err, vault.ErrInsecureServer) {
+		return 0, nil, fmt.Errorf("bitwarden: %s: the server redirected: %w", op, err)
+	}
 	if err != nil {
 		return 0, nil, fmt.Errorf("bitwarden: %s: %w: %w", op, vault.ErrUnreachable, err)
 	}

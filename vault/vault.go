@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -160,8 +161,8 @@ type NetworkLogin struct {
 }
 
 // Server is where an account lives: an official cloud by its name, or
-// a self-hosted server (or Vaultwarden) by its http(s) base URL. The
-// zero Server is none.
+// a self-hosted server (or Vaultwarden) by its base URL, https unless
+// it is on this machine. The zero Server is none.
 type Server struct{ s string }
 
 // The official clouds, by the names ParseServer takes.
@@ -171,7 +172,8 @@ const (
 )
 
 // ParseServer reads a server setting: CloudUS, CloudEU, or an http(s)
-// base URL without a query or fragment.
+// base URL without a query or fragment. A URL CheckTransport refuses is
+// an error matching ErrInsecureServer.
 func ParseServer(s string) (Server, error) {
 	if s == CloudUS || s == CloudEU {
 		return Server{s}, nil
@@ -180,7 +182,27 @@ func ParseServer(s string) (Server, error) {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return Server{}, fmt.Errorf("vault: server %q is neither %s, %s nor an http(s) base URL", s, CloudUS, CloudEU)
 	}
+	if err := CheckTransport(u); err != nil {
+		return Server{}, err
+	}
 	return Server{u.String()}, nil
+}
+
+// CheckTransport refuses a URL that would carry the password hash and
+// the tokens unencrypted off this machine: http to anything but loopback.
+func CheckTransport(u *url.URL) error {
+	if u.Scheme != "http" || isLoopback(u.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s; use https://, as http:// is only for a server on this machine", ErrInsecureServer, u.Redacted())
+}
+
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // String is the cloud's name or the base URL.

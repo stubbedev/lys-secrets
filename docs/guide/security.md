@@ -182,6 +182,8 @@ Argon2id under 2 iterations, 16 MiB or 1 thread. Authenticated items are checked
 with HMAC-SHA256 before they are decrypted.
 
 Requests use Go's standard TLS verification and a 30-second timeout. A self-hosted
-server's URL may be `http://`, and lys-secrets does not warn about it: the password
-hash and the tokens then travel unencrypted. Use `https://` for anything that
-leaves the machine.
+server's URL must be `https://`, because the password hash and the tokens would
+otherwise travel unencrypted. `http://` is accepted only for `localhost` and
+loopback addresses, and a redirect from the server to plain HTTP elsewhere is
+refused. A session saved for an `http://` server from before this rule is deleted
+at start, and the vault starts logged out and says why.

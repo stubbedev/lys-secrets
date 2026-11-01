@@ -494,6 +494,35 @@ func TestExportRefusesATakenName(t *testing.T) {
 
 // The clouds parse by name, a self-hosted base URL to its canonical
 // form; anything else is refused, and so is unmarshalling it.
+func TestParseServerRefusesPlainHTTPOffThisMachine(t *testing.T) {
+	for _, ok := range []string{
+		"http://localhost:8080", "http://LOCALHOST", "HTTP://localhost/vault",
+		"http://127.0.0.1:8000", "http://127.1.2.3", "http://[::1]:8000", "https://vault.example.com",
+	} {
+		if _, err := ParseServer(ok); err != nil {
+			t.Errorf("ParseServer(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"http://vault.example.com", "http://192.168.1.2:8080", "http://10.0.0.1",
+		"http://localhost.example.com", "http://127.0.0.1.example.com", "http://[::ffff:8.8.8.8]",
+		"http://2130706433", "http://user:hunter2@vault.example.com",
+	} {
+		_, err := ParseServer(bad)
+		if !errors.Is(err, ErrInsecureServer) {
+			t.Errorf("ParseServer(%q) = %v, want ErrInsecureServer", bad, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("the error shows the URL's password: %v", err)
+		}
+	}
+	var s Server
+	if err := s.UnmarshalText([]byte("http://vault.example.com")); !errors.Is(err, ErrInsecureServer) {
+		t.Errorf("UnmarshalText = %v, want ErrInsecureServer", err)
+	}
+}
+
 func TestParseServer(t *testing.T) {
 	if s, err := ParseServer(CloudEU); err != nil || s.String() != CloudEU {
 		t.Errorf("EU cloud = %v, %v", s, err)

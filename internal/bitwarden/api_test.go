@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,5 +245,58 @@ func TestCreateCipher(t *testing.T) {
 	g := newFakeServer(t, map[string]http.HandlerFunc{"/api/ciphers": reply(200, `{}`)})
 	if _, err := testClient(g).CreateCipher(context.Background(), "at", cipherRequest{}); err == nil {
 		t.Error("an answer without an id was taken")
+	}
+}
+
+func TestARedirectToPlainHTTPIsRefused(t *testing.T) {
+	var followed atomic.Bool
+	plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
+	t.Cleanup(plain.Close)
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   error
+	}{
+		{"off this machine", "http://vault.example.com/identity/accounts/prelogin/password", vault.ErrInsecureServer},
+		{"to loopback", plain.URL, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, tc.target, http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(srv.Close)
+			server, err := vault.ParseServer(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := NewClient(server, Device{ID: "d", Name: "n"})
+			c.http.Transport = srv.Client().Transport
+			_, err = c.Prelogin(t.Context(), "ada@example.com")
+			if tc.want == nil {
+				if !followed.Load() {
+					t.Errorf("the redirect to loopback was not followed: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) || errors.Is(err, vault.ErrUnreachable) {
+				t.Errorf("Prelogin = %v, want %v and not unreachable", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedirectsStayLimited(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, srv.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+	server, err := vault.ParseServer(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewClient(server, Device{ID: "d", Name: "n"}).Prelogin(t.Context(), "ada@example.com")
+	if err == nil || !strings.Contains(err.Error(), "redirects") {
+		t.Errorf("Prelogin = %v, want the redirect limit", err)
 	}
 }

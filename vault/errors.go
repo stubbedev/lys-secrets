@@ -22,6 +22,7 @@ var (
 	ErrNoSuchField           = errors.New("vault: the item has no such field")
 	ErrRepromptRequired      = errors.New("vault: the item asks for the master password")
 	ErrUnreachable           = errors.New("vault: the server is unreachable")
+	ErrInsecureServer        = errors.New("vault: the password hash and tokens would travel unencrypted")
 	ErrAccessDenied          = errors.New("vault: only the vault's own user may use it")
 	ErrInvalidInput          = errors.New("vault: invalid input")
 	ErrNoSuchFolder          = errors.New("vault: no such folder")
@@ -77,6 +78,7 @@ var sentinels = []struct {
 	{errPrefix + "NoSuchItem", ErrNoSuchItem},
 	{errPrefix + "NoSuchField", ErrNoSuchField},
 	{errPrefix + "RepromptRequired", ErrRepromptRequired},
+	{errPrefix + "InsecureServer", ErrInsecureServer},
 	{errPrefix + "Unreachable", ErrUnreachable},
 	{errPrefix + "AccessDenied", ErrAccessDenied},
 	{errPrefix + "InvalidInput", ErrInvalidInput},
