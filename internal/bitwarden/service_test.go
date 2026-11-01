@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +28,7 @@ type account struct {
 	t          *testing.T
 	mu         sync.Mutex
 	srv        *httptest.Server
+	mux        *http.ServeMux
 	wantHash   string
 	needTOTP   bool
 	refresh    string
@@ -36,6 +38,23 @@ type account struct {
 	posted     []map[string]any
 	postStatus int
 	sends      []map[string]any
+	revoked    []url.Values
+	onRefresh  func()
+}
+
+// revocable makes the account answer the revocation endpoint with status;
+// without this it has none, as Bitwarden's and Vaultwarden's servers have
+// not.
+func (a *account) revocable(status int) {
+	a.mux.HandleFunc("/identity/connect/revocation", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			a.t.Error(err)
+		}
+		a.mu.Lock()
+		a.revoked = append(a.revoked, r.PostForm)
+		a.mu.Unlock()
+		w.WriteHeader(status)
+	})
 }
 
 func newAccount(t *testing.T) *account {
@@ -50,6 +69,7 @@ func newAccount(t *testing.T) *account {
 	mux.HandleFunc("/identity/accounts/prelogin/password", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]any{"KdfSettings": map[string]any{"KdfType": 0, "Iterations": 600000}, "Salt": "test@bitwarden.com"})
 	})
+	a.mux = mux
 	mux.HandleFunc("/identity/connect/token", a.token)
 	mux.HandleFunc("POST /api/ciphers", a.createCipher)
 	mux.HandleFunc("POST /api/sends", a.createSend)
@@ -87,6 +107,12 @@ func (a *account) server() vault.Server {
 func (a *account) token(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		a.t.Error(err)
+	}
+	a.mu.Lock()
+	hook := a.onRefresh
+	a.mu.Unlock()
+	if hook != nil && r.PostForm.Get("grant_type") == "refresh_token" {
+		hook()
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -386,22 +412,165 @@ func TestServiceSync(t *testing.T) {
 	}
 }
 
-// Logout forgets the session.
+// Logout forgets the session here and has the server revoke the current
+// refresh token.
 func TestLogout(t *testing.T) {
+	a := newAccount(t)
+	a.revocable(http.StatusOK)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	if err := s.Login(context.Background(), login(a)); err != nil {
+		t.Fatal(err)
+	}
+	current := s.session().RefreshToken
+	if err := s.Logout(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireLoggedOut(t, s, dir)
+	if s.Status().Err != nil {
+		t.Errorf("status error %v after a revoked session", s.Status().Err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.revoked) != 1 || a.revoked[0].Get("token") != current || a.revoked[0].Get("token_type_hint") != "refresh_token" || a.revoked[0].Get("client_id") != clientID {
+		t.Errorf("revoked %v, want the refresh token %s under client %s", a.revoked, current, clientID)
+	}
+}
+
+func requireLoggedOut(t *testing.T, s *counted, dir string) {
+	t.Helper()
+	if st := s.Status(); st.State != vault.StateLoggedOut || !closed(s) || s.session() != nil {
+		t.Errorf("status %+v, session %v", st, s.session())
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the session file: %v, want it gone", err)
+	}
+	if again := openService(t, dir); again.Status().State != vault.StateLoggedOut {
+		t.Error("a reopened service still has the session")
+	}
+}
+
+func TestLogoutThatTheServerRefusesIsReported(t *testing.T) {
 	a := newAccount(t)
 	dir := t.TempDir()
 	s := openService(t, dir)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Logout(); err != nil {
+	err := s.Logout(context.Background())
+	var server *vault.ServerError
+	if !errors.Is(err, vault.ErrSessionNotRevoked) || !errors.As(err, &server) || server.Status != http.StatusNotFound {
+		t.Errorf("Logout on a server with no revocation = %v, want ErrSessionNotRevoked with its 404", err)
+	}
+	requireLoggedOut(t, s, dir)
+	if !errors.Is(s.Status().Err, vault.ErrSessionNotRevoked) {
+		t.Errorf("status error = %v", s.Status().Err)
+	}
+}
+
+func TestLogoutWithTheServerDownStillForgetsTheSession(t *testing.T) {
+	a := newAccount(t)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
-	if s.Status().State != vault.StateLoggedOut || !closed(s) {
-		t.Errorf("status %+v", s.Status())
+	a.srv.Close()
+	err := s.Logout(context.Background())
+	if !errors.Is(err, vault.ErrSessionNotRevoked) || !errors.Is(err, vault.ErrUnreachable) {
+		t.Errorf("Logout = %v, want ErrSessionNotRevoked and ErrUnreachable", err)
 	}
-	if again := openService(t, dir); again.Status().State != vault.StateLoggedOut {
-		t.Error("a reopened service still has the session")
+	requireLoggedOut(t, s, dir)
+}
+
+func TestLogoutOfAnAPIKeySessionHasNothingToRevoke(t *testing.T) {
+	a := newAccount(t)
+	a.revocable(http.StatusOK)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	if err := s.Login(context.Background(), login(a)); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.sess.RefreshToken = ""
+	s.mu.Unlock()
+	if err := s.Logout(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireLoggedOut(t, s, dir)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.revoked) != 0 {
+		t.Errorf("revoked %v with no refresh token", a.revoked)
+	}
+}
+
+func TestLoggingOutTwiceSendsNothing(t *testing.T) {
+	a := newAccount(t)
+	a.revocable(http.StatusOK)
+	s := openService(t, t.TempDir())
+	if err := s.Login(context.Background(), login(a)); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.Logout(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.revoked) != 1 {
+		t.Errorf("revoked %d times", len(a.revoked))
+	}
+}
+
+// A refresh running when Logout arrives must not save the session back
+// after Logout removed it.
+func TestLogoutWaitsForARunningRefresh(t *testing.T) {
+	a := newAccount(t)
+	a.revocable(http.StatusOK)
+	dir := t.TempDir()
+	s := openService(t, dir)
+	if err := s.Login(context.Background(), login(a)); err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	refreshing, release := make(chan struct{}), make(chan struct{})
+	a.mu.Lock()
+	a.onRefresh = func() {
+		close(refreshing)
+		<-release
+	}
+	a.mu.Unlock()
+	unlocked, loggedOut := make(chan error, 1), make(chan error, 1)
+	go func() { unlocked <- s.Unlock(context.Background(), "asdfasdfasdf") }()
+	waitFor(t, refreshing)
+	go func() { loggedOut <- s.Logout(context.Background()) }()
+	select {
+	case err := <-loggedOut:
+		t.Fatalf("Logout = %v before the running refresh ended", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for _, done := range []chan error{unlocked, loggedOut} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("an operation did not end")
+		}
+	}
+	requireLoggedOut(t, s, dir)
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the refresh did not start")
 	}
 }
 

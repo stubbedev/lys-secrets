@@ -35,6 +35,8 @@ type fakeHost struct {
 	sends    []Send
 	newSends []NewTextSend
 	deleted  []SendID
+
+	logoutErr error
 }
 
 // with runs fn under the host's lock: the daemon's calls arrive on
@@ -97,8 +99,11 @@ func (h *fakeHost) Unlock(_ context.Context, password string) error {
 	return nil
 }
 
-func (h *fakeHost) Lock()         { h.record("lock") }
-func (h *fakeHost) Logout() error { h.record("logout"); return nil }
+func (h *fakeHost) Lock() { h.record("lock") }
+func (h *fakeHost) Logout(context.Context) error {
+	h.record("logout")
+	return h.logoutErr
+}
 
 func (h *fakeHost) Sync(context.Context) error {
 	h.record("sync")
@@ -680,5 +685,22 @@ func TestFolderScope(t *testing.T) {
 	}
 	if f, scoped := InFolder("Work").Folder(); f != "Work" || !scoped {
 		t.Errorf("InFolder = %q %v", f, scoped)
+	}
+}
+
+func TestLogoutReportsASessionTheServerDidNotRevoke(t *testing.T) {
+	for _, cause := range []error{
+		&ServerError{Status: 404, Message: "not found"},
+		fmt.Errorf("%w: connection refused", ErrUnreachable),
+	} {
+		host := &fakeHost{logoutErr: fmt.Errorf("%w: %w", ErrSessionNotRevoked, cause)}
+		_, c, _ := serve(t, host)
+		err := c.Logout(ctx(t))
+		if !errors.Is(err, ErrSessionNotRevoked) {
+			t.Errorf("Logout = %v, want ErrSessionNotRevoked", err)
+		}
+		if err != nil && !strings.Contains(err.Error(), cause.Error()) {
+			t.Errorf("Logout = %v, want it to name the cause %v", err, cause)
+		}
 	}
 }

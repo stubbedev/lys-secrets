@@ -113,7 +113,9 @@ const (
 	errNameHasNoOwner = "org.freedesktop.DBus.Error.NameHasNoOwner"
 )
 
-// Logout locks and forgets the session.
+// Logout locks, forgets the session here, and asks the server to revoke
+// it. An error matching ErrSessionNotRevoked means the first two happened
+// and the server may still accept the old refresh token.
 func (c *Client) Logout(ctx context.Context) error { return c.do(ctx, "Logout") }
 
 // Sync refetches the open vault.

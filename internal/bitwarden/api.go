@@ -214,6 +214,33 @@ func (c *Client) Refresh(ctx context.Context, refreshToken, loginClientID string
 	return t, err
 }
 
+// Revoke asks the server to revoke refreshToken (RFC 7009). The token
+// endpoint's client id needs no secret for a first-party client. An
+// answer other than 200 is an APIError, 404 from a server with no such
+// endpoint among them.
+func (c *Client) Revoke(ctx context.Context, refreshToken, loginClientID string) error {
+	form := url.Values{}
+	form.Set("token", refreshToken)
+	form.Set("token_type_hint", "refresh_token")
+	form.Set("client_id", loginClientID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.server.Identity+"/connect/revocation", strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("bitwarden: revoke request: %w", err)
+	}
+	req.Header.Set(headerContentType, formContentType)
+	req.Header.Set(headerAccept, jsonContentType)
+	req.Header.Set(headerDeviceType, deviceTypeLinux)
+	req.Header.Set(headerClientName, clientID)
+	status, raw, err := c.do(req, "revoke the session")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return apiError("revoke the session", status, errorMessage(raw))
+	}
+	return nil
+}
+
 func (c *Client) tokenForm() url.Values {
 	form := url.Values{}
 	form.Set("deviceType", deviceTypeLinux)

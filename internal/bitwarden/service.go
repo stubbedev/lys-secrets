@@ -701,9 +701,29 @@ func (s *Service) verifyPassword(password string) error {
 	return nil
 }
 
-// Logout locks and forgets the session.
-func (s *Service) Logout() error { return s.logout() }
+// Logout locks and forgets the session here first, then asks the server
+// to revoke its refresh token, so a server that does not answer never
+// keeps a session here. A server that did not revoke it is
+// vault.ErrSessionNotRevoked, in the status as well. A session without a
+// refresh token (an API key login) has nothing to revoke. It waits for a
+// running operation, which may rotate the token or save the session.
+func (s *Service) Logout(ctx context.Context) error {
+	s.op.Lock()
+	defer s.op.Unlock()
+	sess := s.session()
+	err := s.logout()
+	if sess != nil && sess.RefreshToken != "" {
+		if revokeErr := s.newClient(sess.Server, s.device).Revoke(ctx, sess.RefreshToken, sess.ClientID); revokeErr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: %w", vault.ErrSessionNotRevoked, revokeErr))
+		}
+	}
+	if err != nil {
+		return s.fail(err)
+	}
+	return nil
+}
 
+// logout locks and forgets the session here. The caller holds op.
 func (s *Service) logout() error {
 	s.update(func() {
 		s.wipeLocked()

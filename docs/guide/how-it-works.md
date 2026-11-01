@@ -111,7 +111,7 @@ its client.
 | `Field` | One field of one item: username, password, verification code, card number, card code, email or notes |
 | `Login`, `SendLoginEmail` | Logs in with the master password, with an optional second factor or new-device code; asks the server to email that code |
 | `LoginAPIKey` | Logs in with the personal API key and opens the vault with the master password |
-| `Unlock`, `Lock`, `Logout`, `Sync` | Opens with the master password; wipes the keys; also forgets the session; refetches |
+| `Unlock`, `Lock`, `Logout`, `Sync` | Opens with the master password; wipes the keys; also forgets the session and [asks the server to revoke it](/guide/security#the-bitwarden-vault); refetches |
 | `NetworkLogin` | The login answering a network connection, for the secret agent |
 | `CreateLogin` | Adds a login to a folder by name, encrypted here as Bitwarden's clients do |
 | `FindLogin` | Looks up a login by its exact name |

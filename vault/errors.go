@@ -23,6 +23,7 @@ var (
 	ErrRepromptRequired      = errors.New("vault: the item asks for the master password")
 	ErrUnreachable           = errors.New("vault: the server is unreachable")
 	ErrInsecureServer        = errors.New("vault: the password hash and tokens would travel unencrypted")
+	ErrSessionNotRevoked     = errors.New("vault: logged out here, but the server did not revoke the session, so its refresh token may still work; deauthorize sessions from the account's web vault if it may have leaked")
 	ErrAccessDenied          = errors.New("vault: only the vault's own user may use it")
 	ErrInvalidInput          = errors.New("vault: invalid input")
 	ErrNoSuchFolder          = errors.New("vault: no such folder")
@@ -63,6 +64,7 @@ const (
 	errPrefix            = iface + ".Error."
 	errTwoFactorRequired = errPrefix + "TwoFactorRequired"
 	errServer            = errPrefix + "Server"
+	errSessionNotRevoked = errPrefix + "SessionNotRevoked"
 )
 
 // sentinels names each sentinel error on the bus.
@@ -79,6 +81,7 @@ var sentinels = []struct {
 	{errPrefix + "NoSuchField", ErrNoSuchField},
 	{errPrefix + "RepromptRequired", ErrRepromptRequired},
 	{errPrefix + "InsecureServer", ErrInsecureServer},
+	{errSessionNotRevoked, ErrSessionNotRevoked},
 	{errPrefix + "Unreachable", ErrUnreachable},
 	{errPrefix + "AccessDenied", ErrAccessDenied},
 	{errPrefix + "InvalidInput", ErrInvalidInput},
@@ -91,6 +94,9 @@ var sentinels = []struct {
 // encodeError is err as the bus carries it: a contract error under its
 // name, its message first in the body; anything else Failed.
 func encodeError(err error) *dbus.Error {
+	if errors.Is(err, ErrSessionNotRevoked) {
+		return dbus.NewError(errSessionNotRevoked, []any{err.Error()})
+	}
 	if tf, ok := errors.AsType[*TwoFactorRequiredError](err); ok {
 		providers := make([]uint32, len(tf.Providers))
 		for i, p := range tf.Providers {
