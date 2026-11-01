@@ -392,15 +392,23 @@ func idleFixture(t *testing.T, after time.Duration, now func() time.Time) (*fixt
 	}
 	t.Cleanup(svc.Close)
 	f.svc = svc
-	if err := svc.UnlockLogin([]byte(loginPassword)); err != nil {
-		t.Fatal(err)
-	}
 	conn := f.bus.Conn(t)
-	var item, prompt dbus.ObjectPath
-	if err := conn.Object(BusName, defaultAliasPath).Call(ifaceCollection+".CreateItem", 0, itemProps("a"), plainSecret(openSession(t, conn), "kept"), false).Store(&item, &prompt); err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := svc.UnlockLogin([]byte(loginPassword)); err != nil {
+			t.Fatal(err)
+		}
+		var item, prompt dbus.ObjectPath
+		if err := conn.Object(BusName, defaultAliasPath).Call(ifaceCollection+".CreateItem", 0, itemProps("a"), plainSecret(openSession(t, conn), "kept"), false).Store(&item, &prompt); err != nil {
+			t.Fatal(err)
+		}
+		if prompt == noPrompt {
+			return f, conn, item
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the collection kept locking within %v before an item could be created", after)
+		}
 	}
-	return f, conn, item
 }
 
 func (f *fixture) loginLocked() bool {
