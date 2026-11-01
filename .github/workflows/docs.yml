@@ -1,0 +1,15 @@
+name: docs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: docs
+  cancel-in-progress: true
+jobs:
+  pages:
+    uses: stubbedev/lys-docs-theme/.github/workflows/pages.yml@fbadf1d230df34b1df844b7bb7c4c38f82e1c95b
