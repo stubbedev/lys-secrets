@@ -45,14 +45,16 @@ The options of both modules are under [Configuration](/guide/configuration#nix-o
 
 ## Debian, Ubuntu and Fedora
 
-Each [release](https://github.com/stubbedev/lys-secrets/releases) carries an
-x86_64 `.deb` and `.rpm` and a `SHA256SUMS` file:
+Each [release](https://github.com/stubbedev/lys-secrets/releases) carries a `.deb`
+and a `.rpm` for x86_64 and for aarch64, and a `SHA256SUMS` file. On x86_64:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
 sudo apt install ./lys-secrets_<version>_amd64.deb
 sudo dnf install ./lys-secrets-<version>-1.<dist>.x86_64.rpm
 ```
+
+On aarch64 the names end in `_arm64.deb` and `.aarch64.rpm`.
 
 A package installs `/usr/bin/lys-secrets`, the user unit, and reference copies
 of the activation files under `/usr/share/lys-secrets/`. Installing one enables
@@ -73,13 +75,14 @@ install -D -m 0644 -t ~/.local/share/dbus-1/services/ \
 
 ## Other distributions
 
-The release's `lys-secrets-<version>-x86_64-linux.tar.gz` holds the static
-binary, the licence, the unit and both activation files. The unit and the
-activation files name `/usr/bin/lys-secrets`, so the binary goes there:
+The release's `lys-secrets-<version>-<arch>-linux.tar.gz`, with `<arch>` being
+`x86_64` or `aarch64`, holds the static binary, the licence, the unit and both
+activation files. The unit and the activation files name `/usr/bin/lys-secrets`, so
+the binary goes there:
 
 ```sh
-tar xzf lys-secrets-<version>-x86_64-linux.tar.gz
-cd lys-secrets-<version>-x86_64-linux
+tar xzf lys-secrets-<version>-<arch>-linux.tar.gz
+cd lys-secrets-<version>-<arch>-linux
 sudo install -m 0755 lys-secrets /usr/bin/lys-secrets
 sudo install -m 0644 lys-secrets.service /usr/lib/systemd/user/
 ```

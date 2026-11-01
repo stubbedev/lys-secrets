@@ -13,8 +13,14 @@ permissions:
 
 jobs:
     deb:
-        name: Archive + deb
-        runs-on: ubuntu-latest
+        name: Archive + deb (${{ matrix.arch }})
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { arch: x86_64, deb-arch: amd64, runner: ubuntu-latest }
+                    - { arch: aarch64, deb-arch: arm64, runner: ubuntu-24.04-arm }
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
@@ -33,35 +39,45 @@ jobs:
             - name: Build the archive
               env:
                   VERSION: ${{ inputs.version }}
-              run: ./scripts/ci/build-archive.sh dist "${VERSION}" x86_64
+                  ARCH: ${{ matrix.arch }}
+              run: ./scripts/ci/build-archive.sh dist "${VERSION}" "${ARCH}"
 
             - name: Build the Debian package
               env:
                   VERSION: ${{ inputs.version }}
+                  ARCH: ${{ matrix.arch }}
               run: |
                   sudo apt-get update
                   sudo apt-get install -y --no-install-recommends build-essential debhelper dpkg-dev
-                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" deb
+                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-${ARCH}-linux.tar.gz" "${VERSION}" deb
 
             - name: Install and run the Debian package
-              run: sudo ./scripts/ci/smoke-test.sh debbuild/DEBS/amd64/*.deb
+              env:
+                  DEB_ARCH: ${{ matrix.deb-arch }}
+              run: sudo ./scripts/ci/smoke-test.sh "debbuild/DEBS/${DEB_ARCH}"/*.deb
 
             - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
-                  name: archive
-                  path: lys-secrets-${{ inputs.version }}-x86_64-linux.tar.gz
+                  name: archive-${{ matrix.arch }}
+                  path: lys-secrets-${{ inputs.version }}-${{ matrix.arch }}-linux.tar.gz
                   if-no-files-found: error
 
             - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
-                  name: deb
-                  path: debbuild/DEBS/amd64/*.deb
+                  name: deb-${{ matrix.arch }}
+                  path: debbuild/DEBS/${{ matrix.deb-arch }}/*.deb
                   if-no-files-found: error
 
     rpm:
-        name: rpm (Fedora)
+        name: rpm (Fedora, ${{ matrix.arch }})
         needs: deb
-        runs-on: ubuntu-latest
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { arch: x86_64, runner: ubuntu-latest }
+                    - { arch: aarch64, runner: ubuntu-24.04-arm }
         container:
             image: fedora:latest
         steps:
@@ -71,20 +87,23 @@ jobs:
 
             - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
               with:
-                  name: archive
+                  name: archive-${{ matrix.arch }}
 
             - name: Build the RPM package
               env:
                   VERSION: ${{ inputs.version }}
+                  ARCH: ${{ matrix.arch }}
               run: |
                   dnf -y --setopt=install_weak_deps=False install rpm-build systemd-rpm-macros
-                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-x86_64-linux.tar.gz" "${VERSION}" rpm
+                  ./scripts/ci/build-packages.sh "lys-secrets-${VERSION}-${ARCH}-linux.tar.gz" "${VERSION}" rpm
 
             - name: Install and run the RPM package
-              run: ./scripts/ci/smoke-test.sh rpmbuild/RPMS/x86_64/*.rpm
+              env:
+                  ARCH: ${{ matrix.arch }}
+              run: ./scripts/ci/smoke-test.sh "rpmbuild/RPMS/${ARCH}"/*.rpm
 
             - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
-                  name: rpm
-                  path: rpmbuild/RPMS/x86_64/*.rpm
+                  name: rpm-${{ matrix.arch }}
+                  path: rpmbuild/RPMS/${{ matrix.arch }}/*.rpm
                   if-no-files-found: error
