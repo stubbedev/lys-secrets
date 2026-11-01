@@ -65,8 +65,12 @@ func (l VaultLogin) matches(want map[string]string) bool {
 	return true
 }
 
-// Vault is the Bitwarden vault behind the vault collection.
+// Vault is the Bitwarden vault: it locks with the service, and Shown
+// says whether it also shows as the vault collection.
 type Vault interface {
+	// Shown reports whether the vault shows as the read-only VaultID
+	// collection.
+	Shown() bool
 	// Logins are the logins the collection shows; open is false while
 	// the vault is not open.
 	Logins() (logins []VaultLogin, open bool)

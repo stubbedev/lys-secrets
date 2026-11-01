@@ -70,7 +70,7 @@ the process stops. There is no idle timer for collections, and lys-secrets does
 not watch the session's lock state, so locking your screen does not lock them.
 
 `Lock` on the `bitwarden` collection locks the vault. `LockService` locks every
-collection, and the vault only when it is shown as that collection.
+collection and the vault, whether or not the vault shows as a collection.
 
 The vault also locks after [its idle time](/guide/configuration#command-line-flags),
 which restarts when a field is read through `Field` or a password through the

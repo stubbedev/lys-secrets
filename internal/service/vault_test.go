@@ -19,6 +19,7 @@ import (
 // logins and passwords, opened by "master", announcing its changes as
 // lys-secrets' main does.
 type fakeVault struct {
+	hidden    bool
 	mu        sync.Mutex
 	open      bool
 	logins    []VaultLogin
@@ -26,6 +27,8 @@ type fakeVault struct {
 	changed   func()
 	reads     []string
 }
+
+func (v *fakeVault) Shown() bool { return !v.hidden }
 
 func (v *fakeVault) Logins() ([]VaultLogin, bool) {
 	v.mu.Lock()
@@ -283,5 +286,32 @@ func TestVaultSearchMatchesTheExportedAttributes(t *testing.T) {
 		if got := s.searchVaultLocked(tc.query); !slices.Equal(got, tc.want) {
 			t.Errorf("search %v = %v, want %v", tc.query, got, tc.want)
 		}
+	}
+}
+
+func TestLockServiceLocksAVaultNotShownAsACollection(t *testing.T) {
+	v := &fakeVault{hidden: true, open: true, changed: func() {}}
+	bus := dbustest.Session(t)
+	svc, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Prompter: &fakePrompter{}, Vault: v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(svc.Close)
+	if svc.vault != nil {
+		t.Fatal("a hidden vault shows as a collection")
+	}
+	conn := bus.Conn(t)
+	var cols dbus.Variant
+	if err := conn.Object(BusName, rootPath).Call("org.freedesktop.DBus.Properties.Get", 0, ifaceService, "Collections").Store(&cols); err != nil {
+		t.Fatal(err)
+	}
+	if got := cols.Value().([]dbus.ObjectPath); slices.Contains(got, collectionPath(VaultID)) {
+		t.Errorf("Collections = %v shows the hidden vault", got)
+	}
+	if err := conn.Object(BusName, rootPath).Call(ifaceService+".LockService", 0).Err; err != nil {
+		t.Fatal(err)
+	}
+	if _, open := v.Logins(); open {
+		t.Error("LockService left the hidden vault open")
 	}
 }

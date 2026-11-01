@@ -126,11 +126,10 @@ func run(unlockFD int, policy bitwarden.Policy, collectionFolder string) error {
 	defer release()
 	defer bw.Lock()
 
-	cfg := service.Config{Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Prompter: prompt.New(conn)}
-	if collectionFolder != "" {
-		cfg.Vault = vaultCollection{bw: bw, folder: collectionFolder}
-	}
-	svc, err := service.Start(conn, cfg)
+	svc, err := service.Start(conn, service.Config{
+		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Prompter: prompt.New(conn),
+		Vault: vaultCollection{bw: bw, folder: collectionFolder},
+	})
 	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string
 		_ = conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, service.BusName).Store(&owner)
@@ -187,12 +186,14 @@ func serveVault(ctx context.Context, conn *dbus.Conn, dir string, policy bitward
 	return bw, release, nil
 }
 
-// vaultCollection is the vault as the Secret Service's collection: the
-// shareable logins of one folder.
+// vaultCollection is the vault as the Secret Service sees it: the
+// shareable logins of one folder, shown when a folder is set.
 type vaultCollection struct {
 	bw     *bitwarden.Service
 	folder string
 }
+
+func (c vaultCollection) Shown() bool { return c.folder != "" }
 
 func (c vaultCollection) Logins() ([]service.VaultLogin, bool) {
 	logins, open := c.bw.FolderLogins(c.folder)

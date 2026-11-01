@@ -83,7 +83,8 @@ type Config struct {
 	KDF      keyring.KDF
 	Prompter Prompter
 	Now      func() time.Time
-	// Vault, when set, is shown as the read-only VaultID collection.
+	// Vault, when set, locks with LockService, and shows as a collection
+	// if it says so.
 	Vault Vault
 }
 
@@ -105,7 +106,7 @@ type Service struct {
 	// aliases, vault, sessions and prompts: the root object, the
 	// missing-collection subtrees, the owner watch and the bus name.
 	stops []func()
-	// vault is the vault collection, nil without a Config.Vault.
+	// vault is the vault collection, nil unless Config.Vault shows as one.
 	vault *vaultColl
 }
 
@@ -200,7 +201,7 @@ func (s *Service) serveLocked() error {
 			return err
 		}
 	}
-	if s.cfg.Vault != nil {
+	if s.cfg.Vault != nil && s.cfg.Vault.Shown() {
 		if err := s.startVaultLocked(s.cfg.Vault); err != nil {
 			return fmt.Errorf("the vault collection: %w", err)
 		}
@@ -301,16 +302,16 @@ func (s *Service) UnlockLogin(password []byte) error {
 	return nil
 }
 
-// Lock locks every collection, the vault's too.
+// Lock locks every collection and the vault, whether or not the vault
+// shows as a collection.
 func (s *Service) Lock() {
 	s.mu.Lock()
 	for _, c := range s.colls {
 		s.lockCollectionLocked(c)
 	}
-	vc := s.vault
 	s.mu.Unlock()
-	if vc != nil {
-		vc.v.Lock()
+	if s.cfg.Vault != nil {
+		s.cfg.Vault.Lock()
 	}
 }
 

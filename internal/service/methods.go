@@ -234,15 +234,14 @@ func (m serviceMethods) Lock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus
 			locked = append(locked, p)
 		}
 	}
-	vc := s.vault
 	s.mu.Unlock()
 	if lockVault {
-		vc.v.Lock()
+		s.cfg.Vault.Lock()
 	}
 	return locked, noPrompt, nil
 }
 
-// LockService locks everything.
+// LockService locks every collection and the vault.
 func (m serviceMethods) LockService() *dbus.Error {
 	m.s.Lock()
 	return nil
