@@ -77,9 +77,16 @@ can do the following, with no prompt:
   while the vault is open.
 - See a locked collection's item paths, and search it by attribute value.
 - Change or delete items in an unlocked collection.
-- Lock anything, and move aliases.
-- **Delete a whole collection, even a locked one.** Its file is removed with no
-  prompt and no password, so keep backups of what you cannot lose.
+- **Delete a whole unlocked collection.** Its file is removed with no prompt and no
+  password, so keep backups of what you cannot lose.
+- Lock anything, and move aliases, including the `default` alias of a locked
+  collection.
+
+A locked collection and its items cannot be changed or deleted. Such a call answers
+`org.freedesktop.Secret.Error.IsLocked` and leaves the file as it was, so the client
+has to unlock the collection first, through the `Unlock` prompt and its password.
+The exception is `CreateItem`, which returns that prompt itself and stores the item
+only once it succeeds.
 
 A client can only open secrets over a session it opened itself, and its sessions
 close when it leaves the bus.

@@ -331,16 +331,10 @@ func TestSessionsBelongToTheirClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	alice, mallory := f.bus.Conn(t), f.bus.Conn(t)
-	svc := alice.Object(BusName, rootPath)
-	var out dbus.Variant
-	var sess dbus.ObjectPath
-	if err := svc.Call(ifaceService+".OpenSession", 0, algPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
-		t.Fatal(err)
-	}
+	sess := openSession(t, alice)
 	var item, prompt dbus.ObjectPath
-	props := map[string]dbus.Variant{propItemLabel: dbus.MakeVariant("a"), propItemAttrs: dbus.MakeVariant(map[string]string{"k": "v"})}
-	coll := alice.Object(BusName, dbus.ObjectPath(aliasBase+"default"))
-	if err := coll.Call(ifaceCollection+".CreateItem", 0, props, Secret{Session: sess, Parameters: []byte{}, Value: []byte("x"), ContentType: "text/plain"}, false).Store(&item, &prompt); err != nil {
+	coll := alice.Object(BusName, defaultAliasPath)
+	if err := coll.Call(ifaceCollection+".CreateItem", 0, itemProps("a"), plainSecret(sess, "x"), false).Store(&item, &prompt); err != nil {
 		t.Fatal(err)
 	}
 	var secret Secret
@@ -407,7 +401,7 @@ func TestFailedStartLeavesNothingExported(t *testing.T) {
 	client := f.bus.Conn(t)
 	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
 	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
-	requireGone(t, client, conn, dbus.ObjectPath(aliasBase+"default"), ifaceCollection+".SearchItems", map[string]string{})
+	requireGone(t, client, conn, defaultAliasPath, ifaceCollection+".SearchItems", map[string]string{})
 	requireGone(t, client, conn, collectionPath("nothing"), ifaceCollection+".SearchItems", map[string]string{})
 	requireGone(t, client, conn, collectionPath(VaultID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
 	if _, err := other.ReleaseName(BusName); err != nil {
@@ -427,11 +421,7 @@ func TestCloseUnexportsTheService(t *testing.T) {
 	}
 	client := f.bus.Conn(t)
 	root := client.Object(BusName, rootPath)
-	var out dbus.Variant
-	var sess dbus.ObjectPath
-	if err := root.Call(ifaceService+".OpenSession", 0, algPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
-		t.Fatal(err)
-	}
+	sess := openSession(t, client)
 	var coll, prompt dbus.ObjectPath
 	if err := root.Call(ifaceService+".CreateCollection", 0, map[string]dbus.Variant{}, "").Store(&coll, &prompt); err != nil || prompt == noPrompt {
 		t.Fatalf("CreateCollection = %q, %q, %v; want a prompt", coll, prompt, err)
@@ -440,7 +430,7 @@ func TestCloseUnexportsTheService(t *testing.T) {
 	conn := f.svc.conn
 	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
 	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
-	requireGone(t, client, conn, dbus.ObjectPath(aliasBase+"default"), ifaceCollection+".SearchItems", map[string]string{})
+	requireGone(t, client, conn, defaultAliasPath, ifaceCollection+".SearchItems", map[string]string{})
 	requireGone(t, client, conn, sess, ifaceSession+".Close")
 	requireGone(t, client, conn, prompt, ifacePrompt+".Dismiss")
 	var owner string

@@ -365,7 +365,8 @@ func (m collectionMethods) collection() (*collection, *dbus.Error) {
 	return c, nil
 }
 
-// Delete removes the collection and its file.
+// Delete removes an unlocked collection and its file; a locked one is
+// IsLocked and stays as it is, since the client must unlock it first.
 func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	s := m.s
 	s.mu.Lock()
@@ -373,6 +374,9 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	c, derr := m.collection()
 	if derr != nil {
 		return "", derr
+	}
+	if c.kr.Locked() {
+		return "", lockedErr(keyring.ErrLocked)
 	}
 	if err := s.disk.remove(c.id); err != nil {
 		return "", dbusx.Failed(err.Error())

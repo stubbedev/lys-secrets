@@ -166,14 +166,10 @@ func TestVaultCollectionIsReadOnlyAndLocks(t *testing.T) {
 	f, v := vaultFixture(t)
 	v.set(func() { v.open = true })
 	conn := f.bus.Conn(t)
-	var out dbus.Variant
-	var sess dbus.ObjectPath
-	if err := conn.Object(BusName, rootPath).Call(ifaceService+".OpenSession", 0, algPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
-		t.Fatal(err)
-	}
+	sess := openSession(t, conn)
 	item := vaultItemPath(v.logins[0].ID)
-	secret := Secret{Session: sess, Parameters: []byte{}, Value: []byte("new"), ContentType: "text/plain"}
-	props := map[string]dbus.Variant{propItemLabel: dbus.MakeVariant("x"), propItemAttrs: dbus.MakeVariant(map[string]string{"k": "v"})}
+	secret := plainSecret(sess, "new")
+	props := itemProps("x")
 	for name, err := range map[string]error{
 		"CreateItem": conn.Object(BusName, collectionPath(VaultID)).Call(ifaceCollection+".CreateItem", 0, props, secret, false).Err,
 		"Delete":     conn.Object(BusName, collectionPath(VaultID)).Call(ifaceCollection+".Delete", 0).Err,
