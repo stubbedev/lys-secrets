@@ -62,6 +62,8 @@ type Service struct {
 	// changed runs after every status or vault change, outside the
 	// locks.
 	changed func()
+	// keepWake tells Keep to work out its next deadline again.
+	keepWake chan struct{}
 }
 
 // Open loads the session in dir (created 0700), registering a device id
@@ -75,7 +77,7 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed}
+	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1)}
 	sess, err := loadSession(filepath.Join(dir, sessionFile))
 	if errors.Is(err, vault.ErrInsecureServer) {
 		return s.forgetInsecureSession(err)
@@ -239,6 +241,15 @@ func (s *Service) update(f func()) {
 	s.mu.Lock()
 	f()
 	s.mu.Unlock()
+	s.announce()
+}
+
+// announce tells Keep and the owner that the status or the vault changed.
+func (s *Service) announce() {
+	select {
+	case s.keepWake <- struct{}{}:
+	default:
+	}
 	s.changed()
 }
 
@@ -656,6 +667,14 @@ func (s *Service) touch() {
 	s.mu.Unlock()
 }
 
+// upkeepState is the status and, while the vault is open, when it locks
+// if unused for idle.
+func (s *Service) upkeepState(idle time.Duration) (st vault.Status, lockAt time.Time, open bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status, s.lastUse.Add(idle), s.kr != nil
+}
+
 // lockIdle locks an open vault unused for idle or longer: since it
 // opened, or since the last touch. It reports whether it locked.
 func (s *Service) lockIdle(idle time.Duration) bool {
@@ -666,7 +685,7 @@ func (s *Service) lockIdle(idle time.Duration) bool {
 	}
 	s.mu.Unlock()
 	if stale {
-		s.changed()
+		s.announce()
 	}
 	return stale
 }

@@ -16,22 +16,21 @@ type Policy struct {
 	LockAfter, SyncInterval time.Duration
 }
 
-// upkeepTick is how often Keep checks the idle lock and the sync
-// interval.
-const upkeepTick = 30 * time.Second
-
 // Keep upholds p until ctx ends. A periodic sync that fails is
 // reported to failed once per run of failures, and every time it logs
 // the account out.
 func (s *Service) Keep(ctx context.Context, p Policy, failed func(error)) {
-	t := time.NewTicker(upkeepTick)
-	defer t.Stop()
 	u := upkeep{s: s, policy: p, failed: failed}
 	for {
+		var due <-chan time.Time
+		if at, ok := u.next(); ok {
+			due = time.After(at.Sub(s.now()))
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-s.keepWake:
+		case <-due:
 			u.run(ctx, s.now())
 		}
 	}
@@ -45,6 +44,21 @@ type upkeep struct {
 	failed      func(error)
 	lastAttempt time.Time
 	failing     bool
+}
+
+// next is when run has something to do, false while the vault is closed
+// or syncing, whose end wakes Keep. A touch since then only makes run find
+// the lock not yet due.
+func (u *upkeep) next() (time.Time, bool) {
+	st, lockAt, open := u.s.upkeepState(u.policy.LockAfter)
+	at, ok := syncAt(st, u.policy.SyncInterval, u.lastAttempt)
+	if !open || u.policy.LockAfter == 0 {
+		return at, ok
+	}
+	if ok && at.Before(lockAt) {
+		return at, true
+	}
+	return lockAt, true
 }
 
 // run locks the vault once unused for LockAfter and syncs it every
@@ -80,14 +94,21 @@ func (u *upkeep) report(err error) {
 	u.failed(err)
 }
 
-// syncDue reports whether an open vault is due its periodic sync.
-func syncDue(st vault.Status, every time.Duration, lastAttempt, now time.Time) bool {
+// syncAt is when an open vault is due its periodic sync, false when
+// none is coming.
+func syncAt(st vault.Status, every time.Duration, lastAttempt time.Time) (time.Time, bool) {
 	if every == 0 || st.State != vault.StateUnlocked || st.Syncing {
-		return false
+		return time.Time{}, false
 	}
 	last := st.LastSync
 	if lastAttempt.After(last) {
 		last = lastAttempt
 	}
-	return !now.Before(last.Add(every))
+	return last.Add(every), true
+}
+
+// syncDue reports whether an open vault is due its periodic sync.
+func syncDue(st vault.Status, every time.Duration, lastAttempt, now time.Time) bool {
+	at, ok := syncAt(st, every, lastAttempt)
+	return ok && !now.Before(at)
 }
