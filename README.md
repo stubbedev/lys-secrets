@@ -1,180 +1,72 @@
-# lys-secrets
+<p align="center">
+  <img src="docs/public/lys-secrets.svg" width="160" alt="lys-secrets">
+</p>
 
-lys-secrets is the lys desktop's freedesktop
-[Secret Service](https://specifications.freedesktop.org/secret-service-spec/latest/)
-(`org.freedesktop.secrets`), so a lys desktop needs no gnome-keyring,
-KeePassXC or KWallet for app secrets. libsecret (`secret-tool`), Chromium and
-Electron apps, git's `git-credential-libsecret`, python-secretstorage and the
-portal's per-app secrets for sandboxed apps all keep their secrets in it.
+<h1 align="center">lys-secrets</h1>
 
-It also holds your Bitwarden vault (`dev.stubbe.lys.Vault1`): lys-shell's
-vault dropdown, launcher mode and NetworkManager secret agent are views over
-it, so the one process holding the vault's keys is this one.
+<p align="center">
+  The lys desktop's freedesktop
+  <a href="https://specifications.freedesktop.org/secret-service-spec/latest/">Secret Service</a>,
+  so a lys desktop needs no gnome-keyring, KeePassXC or KWallet for app secrets.
+</p>
 
-It is a small process of its own, separate from the shell: it links no UI
-and asks for passwords through the desktop's dialogs (lys-lib's
-`dev.stubbe.lys.PortalDialogs1`, served by lys-shell).
+<p align="center">
+  <a href="https://github.com/stubbedev/lys-secrets/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/stubbedev/lys-secrets/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT license"></a>
+  <a href="https://stubbedev.github.io/lys-secrets/"><img src="https://img.shields.io/badge/docs-stubbedev.github.io-informational?style=for-the-badge" alt="Documentation"></a>
+</p>
 
-## Enabling it
+libsecret (`secret-tool`), Chromium and Electron apps, git's
+`git-credential-libsecret`, python-secretstorage and the portal's per-app secrets
+for sandboxed apps all keep their secrets in it, encrypted at rest. It also holds
+your Bitwarden vault for lys-shell. It is a small process of its own, separate from
+the shell, and asks for passwords through the desktop's dialogs.
 
-Only one program can own `org.freedesktop.secrets`. When another provider
-already owns it, `lys-secrets` logs which one and serves the vault alone, so
-it never takes the name from gnome-keyring.
+As with gnome-keyring, every program running as you can read an unlocked
+collection. The site says
+[how secrets are protected](https://stubbedev.github.io/lys-secrets/guide/security),
+and where that stops.
 
-The flake's package installs the binary, the user unit
-(`lib/systemd/user/lys-secrets.service`) and the D-Bus activation files
-(`share/dbus-1/services/org.freedesktop.secrets.service` and
-`dev.stubbe.lys.Vault1.service`); the modules wire them up:
+## Install
 
-- **NixOS:** import `lys-secrets.nixosModules.default` and set
-  `services.lys-secrets.enable = true;`. It hands the activation file to
-  D-Bus and starts the user unit with the graphical session. It cannot be
-  combined with `services.gnome.gnome-keyring.enable` (evaluation fails with a
-  message).
-- **home-manager:** import `lys-secrets.homeManagerModules.default` and set
-  `services.lys-secrets.enable = true;` to do the same at the user level. Do
-  not run gnome-keyring's secrets component as well.
-- **Debian, Ubuntu and Fedora:** each
-  [release](https://github.com/stubbedev/lys-secrets/releases) carries a
-  `.deb` and an `.rpm` (x86_64) with `/usr/bin/lys-secrets`, the user unit
-  and the activation file as a reference copy under `/usr/share/lys-secrets/`.
-  Installing one enables nothing. Disable gnome-keyring's secrets component,
-  then `systemctl --user enable --now lys-secrets`. To have clients start it
-  on demand too, copy
-  `/usr/share/lys-secrets/org.freedesktop.secrets.service` and
-  `dev.stubbe.lys.Vault1.service` to `~/.local/share/dbus-1/services/`.
-- **Other distributions:** the release's
-  `lys-secrets-<version>-x86_64-linux.tar.gz` holds the static binary, the
-  unit and the activation file. Put the binary at `/usr/bin/lys-secrets`,
-  the unit in `/usr/lib/systemd/user/` (or `~/.config/systemd/user/`), and
-  continue as above.
+Only one program can own `org.freedesktop.secrets`, so disable any other provider
+first.
 
-## Unlocking
+- **NixOS or home-manager:** import `lys-secrets.nixosModules.default` or
+  `lys-secrets.homeManagerModules.default` from this flake and set
+  `services.lys-secrets.enable = true;`.
+- **Debian, Ubuntu and Fedora:** install the `.deb` or `.rpm` from a
+  [release](https://github.com/stubbedev/lys-secrets/releases), then run
+  `systemctl --user enable --now lys-secrets`.
+- **Other distributions:** see
+  [Install](https://stubbedev.github.io/lys-secrets/guide/install).
 
-The `login` collection is encrypted with your session password:
+## Usage
 
-- **lys-login's lock screen** hands the password it just verified to `lys-secrets`
-  over a socket only your user can connect to
-  (`$XDG_RUNTIME_DIR/lys-secrets/control`), never over D-Bus. The first
-  unlock creates the `login` collection with that password and makes it the
-  default.
-- **lys-login's greeter** passes it at login instead:
-  `lys-secrets --unlock-fd N` reads the password from an inherited descriptor.
-- **Anything else** (a restart, another collection, a locked keyring) asks
-  through the desktop's password dialog when an app needs a secret. A wrong
-  password asks again; cancelling leaves the collection locked.
+Log in through lys-login or unlock the session at its lock screen, which unlocks
+the `login` collection with your session password. Then any Secret Service client
+works:
 
-If `lys-secrets` is not running, the lock screen unlocks a running
-gnome-keyring instead, as before.
+```sh
+secret-tool store --label='An example' app example
+secret-tool lookup app example
+```
 
-Changing your login password does not re-encrypt the collection: a
-`ChangeLock` request (for example from Seahorse) asks for the new password.
+## Documentation
 
-## The Bitwarden vault
+**<https://stubbedev.github.io/lys-secrets/>** has
+[getting started](https://stubbedev.github.io/lys-secrets/guide/getting-started),
+[configuration](https://stubbedev.github.io/lys-secrets/guide/configuration),
+[how it works](https://stubbedev.github.io/lys-secrets/guide/how-it-works) and
+[development](https://stubbedev.github.io/lys-secrets/guide/development).
 
-lys-secrets logs in to a Bitwarden account (bitwarden.com, bitwarden.eu, a
-self-hosted server or Vaultwarden) and keeps only the session under
-`$XDG_STATE_HOME/lys-secrets/bitwarden` (mode 0600): the server, the email
-and the refresh token, never the master password, a key or an item. The
-keys and the decrypted items live in memory while the vault is open and are
-wiped when it locks.
+## The lys family
 
-- `--vault-lock-after D` (default `15m`; NixOS and home-manager:
-  `services.lys-secrets.vault.lockAfter`, in minutes) locks the vault after
-  it went that long without a copy; `0` keeps it open.
-- `--vault-sync-interval D` (default `30m`;
-  `services.lys-secrets.vault.syncInterval`) syncs the open vault that
-  often; `0` syncs only on unlock and when asked.
-
-- `--vault-collection-folder NAME` (`services.lys-secrets.vault.collectionFolder`,
-  default none) shows the logins of that vault folder as the Secret
-  Service's read-only `bitwarden` collection, so libsecret clients
-  (`secret-tool lookup username ada`) find them. A locked vault is a locked
-  collection without items. Unlocking it asks for the master password
-  through the desktop's password dialog. Logins behind the master password
-  reprompt, and logins that are not fully decrypted, are left out. Each item
-  carries `xdg:schema` `dev.stubbe.lys.Bitwarden.Login`, `bitwarden:id`,
-  `name`, and the `username`, `uri` (the first) and `folder` it has; its
-  secret is the password.
-
-Over `dev.stubbe.lys.Vault1` a listing carries names, usernames, URIs and
-which fields an item has, never a secret; a secret leaves one field at a
-time, only to a caller running as your user, and an item behind
-Bitwarden's master password reprompt gives one out only with the master
-password. Verification codes are computed here. `CreateLogin` adds a login
-(encrypted here, as Bitwarden's clients do) to a folder by name, and
-`FindLogin` looks one up by its exact name. `Sends` lists your Bitwarden
-Sends, `CreateTextSend` creates a text Send (encrypted here with
-Bitwarden's Send key derivation) and returns its share link with the key,
-and `DeleteSend` deletes one. The Go package `vault` is the
-contract and its client.
-
-## Access
-
-Every program running as you on your session bus may read an unlocked
-collection, as with gnome-keyring. Sandboxed (Flatpak) apps get their secret
-through the portal, which identifies them, and their master secrets live in
-the `login` collection too.
-
-## Storage
-
-Each collection is one file, `$XDG_DATA_HOME/lys-secrets/<id>.keyring`
-(mode 0600), written atomically. Its key is derived from the password with
-Argon2id (3 passes over 64 MiB), and the contents are encrypted with
-XChaCha20-Poly1305. Only the item ids and SHA-256 hashes of their attributes
-are readable without the password, so a locked collection can tell a client
-that a matching item exists and needs an unlock; labels, attribute values
-and secrets are encrypted. While a collection is unlocked, each secret stays
-encrypted in memory and is decrypted only for the request that reads it. The
-key lives outside the Go heap, locked against swap where the memlock limit
-allows, and the process is not dumpable. The format is described in
-`internal/keyring/collection.go`.
-
-Existing gnome-keyring keyrings are not imported.
-
-## Go packages
-
-- `vault`: the Bitwarden vault's D-Bus contract and client (lys-shell's
-  vault widget, launcher mode and network agent).
-- `client`: a Secret Service client (lys-shell's Secret portal keeps the
-  per-app master secrets through it).
-- `control`: the unlock socket's client and server (lys-login unlocks the
-  login collection through it).
-- `secretstest`: the real Secret Service on a test's private bus, with
-  scripted password prompts, for consumers' tests.
-
-Everything else is `internal/`.
-
-## Development
-
-| Recipe | What it does |
-| --- | --- |
-| `just check` | Every release gate in order: vet, lint, test, race, build |
-| `just vet` | Static analysis with `go vet` |
-| `just lint` | Formatting and `golangci-lint run` against `.golangci.yml` |
-| `just test` | `go test -shuffle=on ./...` |
-| `just race` | The suite under the race detector |
-| `just build` | Compile-check every package |
-| `just dist` | The release binary in `dist/`, static and stripped |
-| `just fmt` | Format every Go source in place |
-| `just vendor-hash` | Recompute `nix/package.nix`'s `vendorHash` after a go.mod change |
-
-The dev shell (`nix develop`, or `direnv allow`) pins the Go toolchain go.mod
-names and carries the lint stack, dbus for the tests' private session buses,
-and the Secret Service clients the service is checked against (secret-tool,
-python-secretstorage, Chromium, git's libsecret credential helper).
-`nix flake check` builds the package and evaluates the NixOS and home-manager
-modules.
-
-## CI and releases
-
-`.github/workflows/ci.yml` runs `just check` and `nix flake check`, and builds
-the archive, the `.deb` and the `.rpm` the way a release does
-(`package.yml`, with `scripts/ci/` and `packaging/`), so a packaging break
-shows before a tag. Pushing a tag `vX.Y.Z` runs `release.yml`: the same
-packages at that version, their `SHA256SUMS`, and a GitHub release with
-generated notes.
-
-`.github/workflows/security.yml` runs CodeQL (Go and GitHub Actions), Grype and
-govulncheck, uploading findings to code scanning; dependency review gates
-pull requests. Dependabot keeps the module and the workflows current.
+lys-secrets is part of the lys desktop, with
+[lys-shell](https://github.com/stubbedev/lys-shell),
+[lys-wm](https://github.com/stubbedev/lys-wm),
+[lys-ui](https://github.com/stubbedev/lys-ui),
+[lys-lib](https://github.com/stubbedev/lys-lib),
+[lys-login](https://github.com/stubbedev/lys-login),
+[lys-splash](https://github.com/stubbedev/lys-splash) and
+[lys-polkit](https://github.com/stubbedev/lys-polkit).
