@@ -199,10 +199,7 @@ func (s *Service) promptUnlock(ctx context.Context, id string) bool {
 			return false
 		}
 		s.mu.Lock()
-		err = c.kr.Unlock(password)
-		if err == nil {
-			s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(id))
-		}
+		err = s.unlockLocked(c, password)
 		s.mu.Unlock()
 		clear(password)
 		switch {

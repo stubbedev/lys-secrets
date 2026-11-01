@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,9 +10,16 @@ import (
 	"testing"
 
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+
+	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/keyring"
 )
 
 const loginPassword = "login-pw"
+
+// legacyCollection is a collection file of the first format, with the
+// password "hunter2".
+const legacyCollection = "TFlTS1IAAAEAAAABAAAAQAGjzhhSpY9OmDslM1+vDRBaAAAAAgAAAAEAAAACyHnaGCkaJBKklYTjvZHsapMlK8akXO/oJyyaAOpQ1rXA4HHJXVQSQIpZlWfrrambVWtIGgz3c2AgFk4M1RGirwAAAAIAAAABb639s4oiokdpDy7a5eOnCNcE3HSK/hY6QFGiNKqgPFfGqwg1oGH7ARu3RAavBAXcqIyv9Cb58eYgBerIbRmFHOOPgW0rkzBftxUd8wbTCHUmWTAqUktj7nGFLVbcDPDPqo7d1MHNI+xFI8NlbNB1VC2132AOFqgy07fXXOYVtr7BppwuXube6bai+7wPqBUfmZIernqsRSLyjo+TKU9D5AoyStMTGs6v9m79vZfqelOtTCwv/14h/uLK8pC9bcCIdp4/Ne2i39xsZ/RO/RbRFdKjfODC7lqFk61M9XUQAR4QaRvbxno50j0VltlSEfdMS8NDfZAIR6v73ygqlR87gvWQUDjgQYItpVOSknyhAvnvXtwzA57MliiNzj8D8jZ3q/BNQsYUNVT70TE5l+tLkYTcjTmwRkkwOyBk/vPfGkL7IpQWgKhRxZ4tWG/i/CIL54GH5ypQo8BbM5We4Gz98aGwhPkHZzG43FoV32bOIqNdQ5eBSMyhMt0R+lUYvb2nciYUL0as618TXZ30x6G8cd8w8quIAyYTGQphP81DZ+XoQq/XzUA2xQKPX6RKvURTBUYhEMmttwXUrMCtQZc="
 
 var defaultAliasPath = dbus.ObjectPath(aliasBase + "default")
 
@@ -234,5 +242,53 @@ func TestDeletingACollectionDestroysItsKey(t *testing.T) {
 	defer f.svc.mu.Unlock()
 	if !kr.Locked() {
 		t.Error("the deleted collection's key is still in memory")
+	}
+}
+
+func TestATamperedCollectionIsNotAWrongPassword(t *testing.T) {
+	f, conn, _ := lockedLogin(t, false)
+	f.svc.Close()
+	path := filepath.Join(f.dir, LoginID+collectionExt)
+	data := f.loginFile(t)
+	data[len(data)-1] ^= 1
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start(t)
+
+	err := f.svc.UnlockLogin([]byte(loginPassword))
+	if !errors.Is(err, keyring.ErrTampered) || errors.Is(err, control.ErrWrongPassword) {
+		t.Errorf("UnlockLogin = %v, want ErrTampered and not a wrong password", err)
+	}
+	if !f.unlockThroughPrompt(t, conn, collectionPath(LoginID), loginPassword) {
+		t.Error("a prompt over a tampered file completed")
+	}
+	if asked := f.prompter.log(); len(asked) != 1 {
+		t.Errorf("prompts = %v, want one and no retry", asked)
+	}
+}
+
+func TestUnlockRewritesAFileOfTheFirstFormat(t *testing.T) {
+	f := newFixture(t)
+	f.svc.Close()
+	legacy, err := base64.StdEncoding.DecodeString(legacyCollection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, LoginID+collectionExt), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start(t)
+	if err := f.svc.UnlockLogin([]byte("hunter2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.loginFile(t); bytes.Equal(got, legacy) || got[7] != 2 {
+		t.Errorf("the file was not rewritten in the current format: version byte %d", got[7])
+	}
+	f.svc.Lock()
+	f.svc.Close()
+	f.start(t)
+	if err := f.svc.UnlockLogin([]byte("hunter2")); err != nil {
+		t.Errorf("the rewritten file does not open: %v", err)
 	}
 }

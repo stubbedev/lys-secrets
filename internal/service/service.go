@@ -279,15 +279,11 @@ func (s *Service) UnlockLogin(password []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.colls[LoginID]; ok {
-		err := c.kr.Unlock(password)
+		err := s.unlockLocked(c, password)
 		if errors.Is(err, keyring.ErrWrongPassword) {
 			return fmt.Errorf("%w: %w", control.ErrWrongPassword, err)
 		}
-		if err != nil {
-			return err
-		}
-		s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(LoginID))
-		return nil
+		return err
 	}
 	kr, err := keyring.New("Login", password, s.cfg.KDF, s.now())
 	if err != nil {
@@ -299,6 +295,23 @@ func (s *Service) UnlockLogin(password []byte) error {
 	if _, ok := s.aliases["default"]; !ok {
 		return s.setAliasLocked("default", LoginID)
 	}
+	return nil
+}
+
+// unlockLocked unlocks c and announces it, rewriting a file of the first
+// format so it can tell a wrong password from a changed file from now on.
+// A failed rewrite costs only that, so it does not fail the unlock.
+func (s *Service) unlockLocked(c *collection, password []byte) error {
+	legacy := c.kr.Legacy()
+	if err := c.kr.Unlock(password); err != nil {
+		return err
+	}
+	if legacy {
+		if err := s.saveLocked(c); err != nil {
+			log.Printf("secrets: rewrite collection %s in the current format: %v", c.id, err)
+		}
+	}
+	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 	return nil
 }
 

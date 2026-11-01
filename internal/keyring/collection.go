@@ -4,9 +4,11 @@
 //
 // On disk a collection is one file:
 //
-//	magic     8 bytes  "LYSKR\x00\x00\x01"
+//	magic     8 bytes  "LYSKR\x00\x00\x02"
 //	kdf       u32 time, u32 memory KiB, u8 threads (Argon2id)
 //	salt      16 bytes
+//	check     40 bytes, XChaCha20-Poly1305 nonce and tag over nothing,
+//	          under the key: it opens exactly when the password is right
 //	items     u32 count, then per item: u32 id, u32 n, n × 32-byte
 //	          SHA-256 of u32 len(name) ‖ name ‖ value, one per attribute
 //	body      XChaCha20-Poly1305 nonce, ciphertext and tag of the
@@ -17,6 +19,16 @@
 // gnome-keyring's format does; everything else is in the body. While
 // unlocked, each item's secret stays sealed in memory under the key and
 // opens only for the call that asks for it.
+//
+// The check tells a wrong password from a changed file: when it opens and
+// the body does not, the file was changed. It offers nothing the body does
+// not, since whoever holds the file can already test a password against
+// the body at the same Argon2id cost. A changed KDF, salt or check derives
+// or finds no key, so it still looks like a wrong password.
+//
+// The first format, "LYSKR\x00\x00\x01", has no check, so there a body
+// that fails to open is always ErrWrongPassword. It is read as it stands
+// and written as the current format once unlocked.
 package keyring
 
 import (
@@ -30,17 +42,35 @@ import (
 	"maps"
 	"slices"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
-var magic = [8]byte{'L', 'Y', 'S', 'K', 'R', 0, 0, 1}
+var (
+	magic       = [8]byte{'L', 'Y', 'S', 'K', 'R', 0, 0, 2}
+	legacyMagic = [8]byte{'L', 'Y', 'S', 'K', 'R', 0, 0, 1}
+)
 
-const saltLen = 16
+const (
+	saltLen     = 16
+	keyCheckLen = chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead
+)
+
+// keyCheckAD is what the check binds to; a body's associated data starts
+// with the magic and an item's with "item", so no seal opens as another.
+var keyCheckAD = []byte("key check")
 
 // Errors a caller tells apart.
 var (
+	// ErrWrongPassword is a password that finds no key. A changed KDF,
+	// salt or check, or any change to a file of the first format, is
+	// indistinguishable from it.
 	ErrWrongPassword = errors.New("keyring: wrong password")
-	ErrLocked        = errors.New("keyring: the collection is locked")
-	ErrNoItem        = errors.New("keyring: no such item")
+	// ErrTampered is a file changed after it was written: the password is
+	// right and the contents no longer authenticate under it.
+	ErrTampered = errors.New("keyring: the password is right but the file was changed: its contents do not authenticate")
+	ErrLocked   = errors.New("keyring: the collection is locked")
+	ErrNoItem   = errors.New("keyring: no such item")
 )
 
 type attrHash [sha256.Size]byte
@@ -84,6 +114,9 @@ type Collection struct {
 	// collection that has not been unlocked yet.
 	key  *key
 	body []byte
+	// check is nil only for a parsed file of the first format, until it
+	// unlocks.
+	check []byte
 }
 
 // New creates an unlocked collection whose key derives from password.
@@ -98,7 +131,7 @@ func New(label string, password []byte, kdf KDF, now time.Time) (*Collection, er
 	}
 	return &Collection{
 		kdf: kdf, salt: salt, label: label, created: now.UTC(), mod: now.UTC(),
-		entries: map[uint32]*entry{}, nextID: 1, key: k,
+		entries: map[uint32]*entry{}, nextID: 1, key: k, check: k.seal(nil, keyCheckAD),
 	}, nil
 }
 
@@ -106,7 +139,9 @@ func New(label string, password []byte, kdf KDF, now time.Time) (*Collection, er
 // known by id and attribute hashes only, until Unlock.
 func Parse(data []byte) (*Collection, error) {
 	r := reader{b: data}
-	if !bytes.Equal(r.take(len(magic)), magic[:]) {
+	version := r.take(len(magic))
+	current := bytes.Equal(version, magic[:])
+	if !current && !bytes.Equal(version, legacyMagic[:]) {
 		return nil, errors.New("keyring: not a lys-secrets collection (bad magic)")
 	}
 	c := &Collection{entries: map[uint32]*entry{}, nextID: 1}
@@ -115,6 +150,9 @@ func Parse(data []byte) (*Collection, error) {
 		c.kdf.Threads = t[0]
 	}
 	c.salt = bytes.Clone(r.take(saltLen))
+	if current {
+		c.check = bytes.Clone(r.take(keyCheckLen))
+	}
 	n := r.u32()
 	for range n {
 		if r.err != nil {
@@ -149,11 +187,16 @@ func Parse(data []byte) (*Collection, error) {
 // header is the file's cleartext part, the body's associated data.
 func (c *Collection) header() []byte {
 	var b bytes.Buffer
-	b.Write(magic[:])
+	if c.check == nil {
+		b.Write(legacyMagic[:])
+	} else {
+		b.Write(magic[:])
+	}
 	b.Write(binary.BigEndian.AppendUint32(nil, c.kdf.Time))
 	b.Write(binary.BigEndian.AppendUint32(nil, c.kdf.MemKiB))
 	b.WriteByte(c.kdf.Threads)
 	b.Write(c.salt)
+	b.Write(c.check)
 	ids := slices.Sorted(maps.Keys(c.entries))
 	b.Write(binary.BigEndian.AppendUint32(nil, uint32(len(ids)))) //nolint:gosec // item counts stay far below 2^32
 	for _, id := range ids {
@@ -185,20 +228,33 @@ type itemJSON struct {
 }
 
 // Unlock derives the key from password and opens the body. A wrong
-// password is ErrWrongPassword and leaves the collection locked; a body
-// that opens but does not match its header is corruption.
+// password is ErrWrongPassword, a changed file ErrTampered, and either
+// leaves the collection locked; a body that opens but does not match its
+// header is corruption.
 func (c *Collection) Unlock(password []byte) error {
 	if c.key != nil {
 		return nil
+	}
+	if c.body == nil {
+		return errors.New("keyring: the collection was destroyed or failed to lock, so it opens only from its file")
 	}
 	k, err := deriveKey(password, c.salt, c.kdf)
 	if err != nil {
 		return err
 	}
+	if c.check != nil {
+		if _, err := k.open(c.check, keyCheckAD); err != nil {
+			k.destroy()
+			return ErrWrongPassword
+		}
+	}
 	plain, err := k.open(c.body, c.header())
 	if err != nil {
 		k.destroy()
-		if errors.Is(err, errOpen) {
+		switch {
+		case c.check != nil:
+			return fmt.Errorf("%w: %w", ErrTampered, err)
+		case errors.Is(err, errOpen):
 			return ErrWrongPassword
 		}
 		return fmt.Errorf("keyring: corrupt body: %w", err)
@@ -238,6 +294,9 @@ func (c *Collection) adopt(k *key, body bodyJSON) error {
 	}
 	c.label, c.created, c.mod = body.Label, time.Unix(body.Created, 0).UTC(), time.Unix(body.Modified, 0).UTC()
 	c.key = k
+	if c.check == nil {
+		c.check = k.seal(nil, keyCheckAD)
+	}
 	return nil
 }
 
@@ -276,6 +335,9 @@ func (c *Collection) forget() {
 
 // Locked reports whether the key is gone.
 func (c *Collection) Locked() bool { return c.key == nil }
+
+// Legacy reports a parsed file of the first format, not unlocked yet.
+func (c *Collection) Legacy() bool { return c.check == nil }
 
 // sealBody encrypts the unlocked state under the key.
 func (c *Collection) sealBody() ([]byte, error) {
@@ -342,7 +404,7 @@ func (c *Collection) ChangePassword(password []byte, kdf KDF) error {
 		clear(secret)
 	}
 	c.key.destroy()
-	c.key, c.salt, c.kdf = k, salt, kdf
+	c.key, c.salt, c.kdf, c.check = k, salt, kdf, k.seal(nil, keyCheckAD)
 	return nil
 }
 

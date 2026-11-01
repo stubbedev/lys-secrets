@@ -2,6 +2,7 @@ package keyring
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"slices"
 	"strings"
@@ -316,18 +317,145 @@ func TestCorruptFilesFailPrecisely(t *testing.T) {
 		}
 	}
 
-	// A flipped bit in the body, or in an attribute hash, fails to open
-	// as the wrong password would: AEAD cannot tell the two apart.
-	for _, at := range []int{len(good) - 1, len(magic) + 4 + 4 + 1 + saltLen + 4 + 4 + 4} {
+	const checkAt = len(magic) + 4 + 4 + 1 + saltLen
+	for _, tc := range []struct {
+		name string
+		at   int
+		want error
+	}{
+		{"body", len(good) - 1, ErrTampered},
+		{"attribute hash", checkAt + keyCheckLen + 4 + 4 + 4, ErrTampered},
+		{"item count", checkAt + keyCheckLen + 3, ErrTampered},
+		{"salt", checkAt - 1, ErrWrongPassword},
+		{"key check", checkAt, ErrWrongPassword},
+	} {
 		d := bytes.Clone(good)
-		d[at] ^= 1
+		d[tc.at] ^= 1
 		back, err := Parse(d)
 		if err != nil {
-			t.Fatalf("flip at %d: Parse = %v", at, err)
+			t.Fatalf("%s: Parse = %v", tc.name, err)
 		}
-		if err := back.Unlock([]byte("pw")); !errors.Is(err, ErrWrongPassword) {
-			t.Errorf("flip at %d: Unlock = %v, want an authentication failure", at, err)
+		err = back.Unlock([]byte("pw"))
+		if !errors.Is(err, tc.want) || !back.Locked() {
+			t.Errorf("%s: Unlock = %v (locked %v), want %v", tc.name, err, back.Locked(), tc.want)
 		}
+	}
+}
+
+func TestATruncatedBodyIsTampering(t *testing.T) {
+	c := newTestCollection(t, "pw")
+	good, _ := c.Marshal()
+	back, err := Parse(good[:len(good)-30])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := back.Unlock([]byte("pw")); !errors.Is(err, ErrTampered) {
+		t.Errorf("Unlock of a truncated body = %v, want ErrTampered", err)
+	}
+	if err := back.Unlock([]byte("other")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("Unlock with another password = %v, want ErrWrongPassword", err)
+	}
+}
+
+// legacyFile is a collection the first format wrote, with the password
+// "hunter2" and the items git (tok-1) and mail (pw-2).
+const legacyFile = "TFlTS1IAAAEAAAABAAAAQAGjzhhSpY9OmDslM1+vDRBaAAAAAgAAAAEAAAACyHnaGCkaJBKklYTjvZHsapMlK8akXO/oJyyaAOpQ1rXA4HHJXVQSQIpZlWfrrambVWtIGgz3c2AgFk4M1RGirwAAAAIAAAABb639s4oiokdpDy7a5eOnCNcE3HSK/hY6QFGiNKqgPFfGqwg1oGH7ARu3RAavBAXcqIyv9Cb58eYgBerIbRmFHOOPgW0rkzBftxUd8wbTCHUmWTAqUktj7nGFLVbcDPDPqo7d1MHNI+xFI8NlbNB1VC2132AOFqgy07fXXOYVtr7BppwuXube6bai+7wPqBUfmZIernqsRSLyjo+TKU9D5AoyStMTGs6v9m79vZfqelOtTCwv/14h/uLK8pC9bcCIdp4/Ne2i39xsZ/RO/RbRFdKjfODC7lqFk61M9XUQAR4QaRvbxno50j0VltlSEfdMS8NDfZAIR6v73ygqlR87gvWQUDjgQYItpVOSknyhAvnvXtwzA57MliiNzj8D8jZ3q/BNQsYUNVT70TE5l+tLkYTcjTmwRkkwOyBk/vPfGkL7IpQWgKhRxZ4tWG/i/CIL54GH5ypQo8BbM5We4Gz98aGwhPkHZzG43FoV32bOIqNdQ5eBSMyhMt0R+lUYvb2nciYUL0as618TXZ30x6G8cd8w8quIAyYTGQphP81DZ+XoQq/XzUA2xQKPX6RKvURTBUYhEMmttwXUrMCtQZc="
+
+func legacyBytes(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(legacyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestAFileOfTheFirstFormatOpensAndBecomesCurrent(t *testing.T) {
+	c, err := Parse(legacyBytes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Legacy() {
+		t.Error("the first format is not reported as legacy")
+	}
+	if err := c.Unlock([]byte("wrong")); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("Unlock(wrong) = %v", err)
+	}
+	if err := c.Unlock([]byte("hunter2")); err != nil {
+		t.Fatal(err)
+	}
+	if c.Legacy() {
+		t.Error("an unlocked collection is still legacy")
+	}
+	if got := secretOf(t, c, 1); got != "tok-1" {
+		t.Errorf("secret = %q", got)
+	}
+	if err := c.Lock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Unlock([]byte("hunter2")); err != nil {
+		t.Fatalf("Unlock after relocking the upgraded collection: %v", err)
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(data, magic[:]) {
+		t.Errorf("the rewritten file starts %q", data[:len(magic)])
+	}
+	back, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := back.Unlock([]byte("hunter2")); err != nil {
+		t.Fatal(err)
+	}
+	if got := secretOf(t, back, 2); got != "pw-2" {
+		t.Errorf("secret = %q", got)
+	}
+}
+
+// The first format cannot tell the two apart; a current file rolled back
+// to its magic must not open either.
+func TestChangesToTheFirstFormatLookLikeAWrongPassword(t *testing.T) {
+	d := legacyBytes(t)
+	d[len(d)-1] ^= 1
+	c, err := Parse(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Unlock([]byte("hunter2")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("Unlock = %v, want ErrWrongPassword", err)
+	}
+
+	current := newTestCollection(t, "pw")
+	data, _ := current.Marshal()
+	const checkAt = len(magic) + 4 + 4 + 1 + saltLen
+	rolledBack := slices.Concat(legacyMagic[:], data[len(magic):checkAt], data[checkAt+keyCheckLen:])
+	c, err = Parse(rolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Unlock([]byte("pw")); !errors.Is(err, ErrWrongPassword) || !c.Locked() {
+		t.Errorf("Unlock of a rolled back file = %v, locked %v", err, c.Locked())
+	}
+}
+
+func TestChangePasswordRenewsTheKeyCheck(t *testing.T) {
+	c := newTestCollection(t, "old")
+	if err := c.ChangePassword([]byte("new"), testKDF); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := c.Marshal()
+	back, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := back.Unlock([]byte("old")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("Unlock(old) = %v", err)
+	}
+	if err := back.Unlock([]byte("new")); err != nil {
+		t.Errorf("Unlock(new) = %v", err)
 	}
 }
 

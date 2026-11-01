@@ -18,12 +18,25 @@ XChaCha20-Poly1305 under a fresh nonce.
 
 | Part of the file | Contents | Readable without the password |
 | --- | --- | --- |
-| Header | Format magic, Argon2id parameters, salt | Yes |
+| Header | Format magic, Argon2id parameters, salt, and a key check: an authentication tag under the key, over nothing | Yes |
 | Item index | Each item's numeric id and one SHA-256 hash per attribute | Yes |
 | Body | The collection's label and times; each item's label, attributes, content type, secret and times | No |
 
 The header and index are authenticated as part of the body, so changing them makes
-the file fail to open. A wrong password and a tampered file give the same error.
+the file fail to open. The key check tells the two failures apart:
+
+| What happened | What you get |
+| --- | --- |
+| The password is wrong | Wrong password; the dialog asks again |
+| The body or the item index changed | The file was changed: logged, no retry, and the collection stays locked |
+| The Argon2id parameters, the salt or the key check changed | Wrong password. These decide what key the password gives, so a changed one finds no key and cannot be told apart |
+
+The check gives away nothing new. Whoever holds the file can already test a password
+against the body, and it costs the same Argon2id derivation.
+
+A file from before the key check opens as it stands, and any change to it reads as
+a wrong password. It is rewritten with a key check the first time it unlocks, and
+older versions of lys-secrets cannot read the rewritten file.
 
 What someone holding the file can learn without the password:
 
