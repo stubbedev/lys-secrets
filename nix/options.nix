@@ -41,8 +41,8 @@ self: {
       type = lib.types.ints.unsigned;
       default = 15;
       description = ''
-        Lock the Bitwarden vault after it went this many minutes without a
-        copy. 0 keeps it open until locked by hand or with the session.
+        Lock the Bitwarden vault after it went this many minutes with no field
+        read from it. 0 keeps it open until locked by hand or with the session.
       '';
     };
     collectionFolder = lib.mkOption {

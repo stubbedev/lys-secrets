@@ -12,11 +12,13 @@
 //	            [--vault-lock-after D] [--vault-sync-interval D] [--vault-collection-folder NAME]
 //
 // The login collection unlocks with the password the user logs in or
-// unlocks the session with: the login screen writes it to an inherited
-// descriptor (--unlock-fd), the lock screen sends it over the control
-// socket at $XDG_RUNTIME_DIR/lys-secrets/control. When another provider
-// already owns org.freedesktop.secrets, lys-secrets logs who and serves
-// the vault alone; when another lys-secrets serves the vault, it exits.
+// unlocks the session with: lys-login, at both its login and its lock
+// screen, sends it over the control socket at
+// $XDG_RUNTIME_DIR/lys-secrets/control, and whatever starts this process
+// with the password in hand may write it to an inherited descriptor
+// (--unlock-fd). When another provider already owns
+// org.freedesktop.secrets, lys-secrets logs who and serves the vault
+// alone; when another lys-secrets serves the vault, it exits.
 package main
 
 import (

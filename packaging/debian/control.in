@@ -23,5 +23,5 @@ Description: freedesktop Secret Service for the lys desktop
  .
  The package activates nothing by itself, since gnome-keyring may claim
  the same name: enable the user unit with
- systemctl --user enable --now lys-secrets. The D-Bus activation file
- is installed as a reference under /usr/share/lys-secrets.
+ systemctl --user enable --now lys-secrets. The D-Bus activation files
+ are installed as a reference under /usr/share/lys-secrets.

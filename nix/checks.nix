@@ -57,7 +57,7 @@
   in {
     checks =
       {
-        # The package installs the binary, the unit and the activation file,
+        # The package installs the binary, the unit and the activation files,
         # each naming the installed binary.
         package = pkgs.runCommand "lys-secrets-package" {} ''
           test -x ${pkg}/bin/lys-secrets

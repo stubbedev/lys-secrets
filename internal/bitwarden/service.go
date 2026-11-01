@@ -301,8 +301,10 @@ func (s *Service) SendLoginEmail(ctx context.Context, req vault.LoginRequest) er
 }
 
 // LoginAPIKey logs in with the personal API key and opens the vault
-// with the master password. The server issues no refresh token for it:
-// once the access token expires, a locked vault needs the key again.
+// with the master password. The server issues no refresh token for it,
+// and locking drops the access token, so once the vault locks an unlock
+// logs out and it needs a new login. An open vault's sync does the same
+// once the access token expires.
 func (s *Service) LoginAPIKey(ctx context.Context, req vault.APIKeyRequest) error {
 	s.op.Lock()
 	defer s.op.Unlock()

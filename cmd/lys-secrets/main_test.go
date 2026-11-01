@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -346,5 +347,26 @@ func TestANegativeCollectionLockAfterIsRefused(t *testing.T) {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(out), "--collection-lock-after") {
 		t.Errorf("exit %v, output %q", err, out)
+	}
+}
+
+// The usage line in the package comment names every flag.
+func TestTheUsageLineNamesEveryFlag(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _, found := strings.Cut(string(src), "package main")
+	if !found {
+		t.Fatal("main.go has no package clause")
+	}
+	flags := regexp.MustCompile(`flag\.\w+\(&[\w.]+, "([a-z-]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(flags) == 0 {
+		t.Fatal("found no flags in main.go")
+	}
+	for _, m := range flags {
+		if !strings.Contains(doc, "[--"+m[1]) {
+			t.Errorf("the usage line omits --%s", m[1])
+		}
 	}
 }

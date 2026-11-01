@@ -1,6 +1,6 @@
 // Package control is lys-secrets' unlock channel: a unix socket in the
-// user's runtime directory through which the lock screen (or the login
-// screen) hands over the password it just verified, so the login
+// user's runtime directory through which lys-login's login and lock
+// screens hand over the password they just verified, so the login
 // collection unlocks with it. The password never crosses D-Bus. Only
 // processes of the same user may connect, checked with SO_PEERCRED.
 //
@@ -157,8 +157,9 @@ func readPassword(r io.Reader) ([]byte, error) {
 	return password, nil
 }
 
-// ReadPassword reads a password a login screen wrote to an inherited
-// descriptor: the whole stream, without a trailing newline.
+// ReadPassword reads a password whatever started the process wrote to an
+// inherited descriptor (--unlock-fd): the whole stream, without a trailing
+// newline.
 func ReadPassword(r io.Reader) ([]byte, error) {
 	password, err := io.ReadAll(io.LimitReader(r, maxPassword+1))
 	if err != nil {
