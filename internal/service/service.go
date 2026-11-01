@@ -246,8 +246,9 @@ func (s *Service) withdrawLocked() {
 	}
 }
 
-// Close locks every collection, gives up the bus name and unexports
-// everything Start exported.
+// Close destroys every collection's key, gives up the bus name and
+// unexports everything Start exported. Every change is on disk already,
+// so nothing is sealed on the way out.
 func (s *Service) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -256,7 +257,7 @@ func (s *Service) Close() {
 	}
 	s.closed = true
 	for _, c := range s.colls {
-		_ = c.kr.Lock()
+		c.kr.Destroy()
 	}
 	s.withdrawLocked()
 }
@@ -548,8 +549,7 @@ func (s *Service) lockCollectionLocked(c *collection) {
 		return
 	}
 	if err := c.kr.Lock(); err != nil {
-		log.Printf("secrets: lock collection %s: %v", c.id, err)
-		return
+		log.Printf("secrets: lock collection %s: its key is destroyed, but it opens again only after a restart: %v", c.id, err)
 	}
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 }

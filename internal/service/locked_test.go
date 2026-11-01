@@ -217,3 +217,22 @@ func TestALockedCollectionRefusesEveryChange(t *testing.T) {
 		})
 	}
 }
+
+func TestDeletingACollectionDestroysItsKey(t *testing.T) {
+	f := newFixture(t)
+	if err := f.svc.UnlockLogin([]byte(loginPassword)); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.mu.Lock()
+	kr := f.svc.colls[LoginID].kr
+	f.svc.mu.Unlock()
+	conn := f.bus.Conn(t)
+	if err := conn.Object(BusName, collectionPath(LoginID)).Call(ifaceCollection+".Delete", 0).Err; err != nil {
+		t.Fatal(err)
+	}
+	f.svc.mu.Lock()
+	defer f.svc.mu.Unlock()
+	if !kr.Locked() {
+		t.Error("the deleted collection's key is still in memory")
+	}
+}

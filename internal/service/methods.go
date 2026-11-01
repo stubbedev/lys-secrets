@@ -381,7 +381,7 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	if err := s.disk.remove(c.id); err != nil {
 		return "", dbusx.Failed(err.Error())
 	}
-	_ = c.kr.Lock()
+	c.kr.Destroy()
 	c.unexport()
 	delete(s.colls, c.id)
 	for alias, id := range s.aliases {

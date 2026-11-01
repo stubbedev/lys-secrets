@@ -242,16 +242,29 @@ func (c *Collection) adopt(k *key, body bodyJSON) error {
 }
 
 // Lock seals the collection's current state into its body and destroys
-// the key: what remains in memory is the header a locked file shows.
+// the key: what remains in memory is the header a locked file shows. The
+// key is destroyed whatever happens: state that fails to seal is an
+// error, and the collection stays locked with no body, so it opens again
+// only from its file, by a new Parse.
 func (c *Collection) Lock() error {
 	if c.key == nil {
 		return nil
 	}
 	body, err := c.sealBody()
-	if err != nil {
-		return err
-	}
 	c.body = body
+	c.forget()
+	return err
+}
+
+// Destroy drops the key and the unlocked state without sealing anything,
+// for a collection that is not used again. It cannot fail.
+func (c *Collection) Destroy() {
+	c.body = nil
+	c.forget()
+}
+
+// forget destroys the key and everything only it could read.
+func (c *Collection) forget() {
 	for _, e := range c.entries {
 		e.Item = Item{ID: e.ID}
 		e.sealed = nil
@@ -259,7 +272,6 @@ func (c *Collection) Lock() error {
 	c.label, c.created, c.mod = "", time.Time{}, time.Time{}
 	c.key.destroy()
 	c.key = nil
-	return nil
 }
 
 // Locked reports whether the key is gone.
@@ -293,7 +305,7 @@ func (c *Collection) sealBody() ([]byte, error) {
 }
 
 // Marshal is the collection file. A locked collection writes the body it
-// was parsed or locked with.
+// was parsed or locked with; one left without a body has no file to give.
 func (c *Collection) Marshal() ([]byte, error) {
 	body := c.body
 	if c.key != nil {
@@ -301,6 +313,8 @@ func (c *Collection) Marshal() ([]byte, error) {
 		if body, err = c.sealBody(); err != nil {
 			return nil, err
 		}
+	} else if body == nil {
+		return nil, errors.New("keyring: the collection was destroyed or failed to lock, so it has no body to write")
 	}
 	return append(c.header(), body...), nil
 }

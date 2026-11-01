@@ -148,6 +148,50 @@ func TestLockSealsChangesAndUnlockRestoresThem(t *testing.T) {
 	}
 }
 
+func corruptSealedSecret(t *testing.T, c *Collection, id uint32) {
+	t.Helper()
+	e, ok := c.entries[id]
+	if !ok {
+		t.Fatalf("no item %d", id)
+	}
+	e.sealed[len(e.sealed)-1] ^= 1
+}
+
+func TestLockThatCannotSealStillDestroysTheKey(t *testing.T) {
+	c := newTestCollection(t, "pw")
+	id := mustCreate(t, c, "a", map[string]string{"k": "v"}, "s")
+	k := c.key
+	corruptSealedSecret(t, c, id)
+
+	if err := c.Lock(); err == nil {
+		t.Fatal("Lock sealed a secret that does not open")
+	}
+	if !c.Locked() || k.page != nil {
+		t.Errorf("locked %v, key page %v: the key outlived a failed Lock", c.Locked(), k.page)
+	}
+	if err := c.Unlock([]byte("pw")); err == nil || errors.Is(err, ErrWrongPassword) {
+		t.Errorf("Unlock after a failed Lock = %v, want an error about the missing body", err)
+	}
+	if _, err := c.Marshal(); err == nil {
+		t.Error("Marshal wrote a file with no body")
+	}
+}
+
+func TestDestroyDropsTheKeyWithoutSealing(t *testing.T) {
+	c := newTestCollection(t, "pw")
+	id := mustCreate(t, c, "a", map[string]string{"k": "v"}, "s")
+	k := c.key
+	corruptSealedSecret(t, c, id)
+
+	c.Destroy()
+	if !c.Locked() || k.page != nil || c.Label() != "" {
+		t.Errorf("locked %v, key page %v, label %q after Destroy", c.Locked(), k.page, c.Label())
+	}
+	if it, _ := c.Item(id); it.Label != "" || it.Attributes != nil {
+		t.Errorf("a destroyed item shows %+v", it)
+	}
+}
+
 func TestSearchMatchesEveryAttribute(t *testing.T) {
 	c := newTestCollection(t, "pw")
 	a := mustCreate(t, c, "a", map[string]string{"service": "git", "user": "me"}, "1")
