@@ -1,23 +1,26 @@
-{self, ...}: {
+{
   perSystem = {
     lib,
     pkgs,
     ...
-  }: {
+  }: let
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.difference (lib.fileset.gitTracked ../.) (
+        lib.fileset.unions [
+          ../flake.nix
+          ../flake.lock
+          ../nix
+          ../docs
+        ]
+      );
+    };
+  in {
     packages.default = pkgs.buildGo127Module {
       pname = "lys-secrets";
-      version = "0-unstable-${self.lastModifiedDate or "0"}";
+      version = "0-unstable-${lib.substring 0 8 (builtins.unsafeDiscardStringContext (baseNameOf src))}";
 
-      src = lib.fileset.toSource {
-        root = ../.;
-        fileset = lib.fileset.difference (lib.fileset.gitTracked ../.) (
-          lib.fileset.unions [
-            ../flake.nix
-            ../flake.lock
-            ../nix
-          ]
-        );
-      };
+      inherit src;
 
       # The module cache's hash; `just vendor-hash` recomputes it after a
       # go.mod change.
