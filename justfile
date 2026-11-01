@@ -39,15 +39,6 @@ dist:
 fmt:
     golangci-lint fmt
 
-# Recompute nix/package.nix's vendorHash after a go.mod change: the
-# vendor derivation is fixed-output, so a stale hash reuses the old
-# module set instead of reporting the new one.
+# Set nix/package.nix's vendorHash to the hash of the modules go.sum pins.
 vendor-hash:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    file=nix/package.nix
-    sed -i 's|vendorHash = "sha256-[^"]*";|vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";|' "$file"
-    got=$( (nix build .#default --no-link 2>&1 || true) | sed -n 's/^ *got: *\(sha256-[^ ]*\).*/\1/p' | head -1)
-    if [ -z "$got" ]; then echo "no hash reported" >&2; exit 1; fi
-    sed -i "s|vendorHash = \"sha256-[^\"]*\";|vendorHash = \"$got\";|" "$file"
-    echo "vendorHash = $got"
+    nix run github:stubbedev/lys-ci#vendor-hash -- nix/package.nix .#default.goModules
