@@ -59,8 +59,11 @@ file with a fresh salt, but a copy taken earlier still opens with the old one.
 
 The collection key lives in its own anonymous memory mapping, outside the Go heap
 so the collector never copies it. It is excluded from core dumps and zeroed when
-the collection locks. It is locked against swap where the memlock limit allows; if
-the limit does not allow it, nothing says so and the key may reach swap.
+the collection locks. It is locked against swap where the memlock limit allows. If
+the limit does not allow it, lys-secrets logs that once, with the limit, and keeps
+serving, and the key may reach swap. Each key takes one page, so the usual limit
+holds many. Raise `LimitMEMLOCK=` for the unit, or use encrypted or no swap, if you
+see that line.
 
 Each secret stays encrypted in memory under that key, bound to its item so secrets
 cannot be swapped between items, and is decrypted only for the request that reads
