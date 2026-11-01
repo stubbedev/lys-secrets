@@ -14,13 +14,9 @@
     };
   };
 
-  outputs = inputs @ {
-    flake-parts,
-    nixpkgs,
-    ...
-  }:
+  outputs = inputs @ {flake-parts, ...}:
     flake-parts.lib.mkFlake {inherit inputs;} {
-      systems = nixpkgs.lib.systems.flakeExposed;
+      systems = ["x86_64-linux" "aarch64-linux"];
       imports = [
         ./nix/package.nix
         ./nix/shell.nix

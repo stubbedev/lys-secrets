@@ -94,7 +94,7 @@
           == ["" "${pkg}/bin/lys-secrets --vault-lock-after=15m --vault-sync-interval=30m"]
         );
       }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      // {
         activation-vm = pkgs.callPackage ./tests/activation-vm.nix {inherit self;};
       };
   };
