@@ -64,7 +64,18 @@ type Service struct {
 	changed func()
 	// keepWake tells Keep to work out its next deadline again.
 	keepWake chan struct{}
+	// wakeCheck bounds how long Keep sleeps toward a deadline.
+	wakeCheck time.Duration
 }
+
+// wakeCheckEvery bounds how late Keep acts after a suspend, which its
+// timers do not count and the wall clock does.
+const wakeCheckEvery = 30 * time.Second
+
+// wallClock is the time without its monotonic reading, which stops during
+// a suspend: idle times, sync intervals and token expiries all pass while
+// the machine sleeps.
+func wallClock() time.Time { return time.Now().Round(0) }
 
 // Open loads the session in dir (created 0700), registering a device id
 // on first use: an account there starts locked, none logged out.
@@ -77,7 +88,7 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{dir: dir, now: time.Now, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1)}
+	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery}
 	sess, err := loadSession(filepath.Join(dir, sessionFile))
 	if errors.Is(err, vault.ErrInsecureServer) {
 		return s.forgetInsecureSession(err)

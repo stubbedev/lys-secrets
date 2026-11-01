@@ -24,7 +24,7 @@ func (s *Service) Keep(ctx context.Context, p Policy, failed func(error)) {
 	for {
 		var due <-chan time.Time
 		if at, ok := u.next(); ok {
-			due = time.After(at.Sub(s.now()))
+			due = time.After(min(at.Sub(s.now()), s.wakeCheck))
 		}
 		select {
 		case <-ctx.Done():

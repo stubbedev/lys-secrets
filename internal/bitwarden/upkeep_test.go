@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,5 +159,51 @@ func TestUpkeepNext(t *testing.T) {
 	s.mu.Unlock()
 	if at, ok := u.next(); ok {
 		t.Errorf("a running sync with no lock has a deadline at %v", at)
+	}
+}
+
+func TestTheClockHasNoMonotonicReading(t *testing.T) {
+	s := openService(t, t.TempDir())
+	if now := s.now(); now != now.Round(0) {
+		t.Errorf("s.now() = %v carries a monotonic reading, which stops during a suspend", now)
+	}
+}
+
+// A suspend stops Keep's timer, so on waking it must see the wall clock
+// moved on well before the timer's own deadline comes round.
+func TestKeepLocksSoonAfterASuspendLongerThanTheIdleTime(t *testing.T) {
+	a := newAccount(t)
+	s, err := Open(t.TempDir(), "lys-secrets", func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(upkeepNow.Unix())
+	s.now = func() time.Time { return time.Unix(clock.Load(), 0).UTC() }
+	s.wakeCheck = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Keep(ctx, Policy{LockAfter: time.Hour}, func(err error) { t.Errorf("reported %v", err) })
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	if err := s.Login(ctx, login(a)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if st := s.Status(); st.State != vault.StateUnlocked {
+		t.Fatalf("locked with the idle time not passed: %+v", st)
+	}
+	clock.Add(int64((2 * time.Hour).Seconds()))
+	deadline := time.Now().Add(5 * time.Second)
+	for s.Status().State != vault.StateLocked {
+		if time.Now().After(deadline) {
+			t.Fatalf("still %+v after the wall clock jumped past the idle time", s.Status())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

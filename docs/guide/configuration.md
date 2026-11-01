@@ -15,9 +15,8 @@ the Nix modules write those flags for you.
 | `--vault-collection-folder NAME` | empty | Show the logins of this vault folder as the read-only `bitwarden` collection; empty shows none |
 
 Durations use Go's syntax, such as `90s` or `1h30m`. A negative one is refused at
-start. The vault's idle lock and its sync interval are checked every 30 seconds, so
-they act up to that much late. A collection's idle lock acts on time, and counts
-time the machine was suspended, acting within 30 seconds of it waking.
+start. The idle locks and the vault's sync interval act on time and count time the
+machine was suspended, acting within 30 seconds of it waking.
 
 `--collection-lock-on-screen-lock` watches the logind session on the system bus: its
 `Lock` signal and its `LockedHint` turning true, which lys-login's lock screen sets.
