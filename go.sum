@@ -1,5 +1,5 @@
-github.com/stubbedev/lys-lib v0.3.1-0.20261102222225-4bc74fcb194b h1:eVqYMPDK+xhqHMtpg0itldFw9r6+dMWbJ/U2XWg9Y/0=
-github.com/stubbedev/lys-lib v0.3.1-0.20261102222225-4bc74fcb194b/go.mod h1:uMuMAmarcuddaEYxIM6QNtMM/fDbM0DVS31U/iSq7/o=
+github.com/stubbedev/lys-lib v0.3.2-0.20261103105852-54fc6c111d99 h1:VclCixeNe/dJfEKTxDrzbDZOTgDkBBDruM8A1wkCnmE=
+github.com/stubbedev/lys-lib v0.3.2-0.20261103105852-54fc6c111d99/go.mod h1:uMuMAmarcuddaEYxIM6QNtMM/fDbM0DVS31U/iSq7/o=
 golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
 golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
