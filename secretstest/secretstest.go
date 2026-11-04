@@ -30,7 +30,7 @@ func Start(t testing.TB, conn *dbus.Conn, password string) *Server {
 	t.Helper()
 	p := &prompts{}
 	svc, err := service.Start(conn, service.Config{
-		Dir: t.TempDir(), KDF: keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}, Prompter: p,
+		Dir: t.TempDir(), KDF: keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}, Stretch: keyring.Argon2id, Prompter: p,
 	})
 	if err != nil {
 		t.Fatalf("secretstest: start the Secret Service: %v", err)

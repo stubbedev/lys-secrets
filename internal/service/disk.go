@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/stubbedev/lys-lib/atomicfile"
 )
 
 const (
@@ -19,8 +17,12 @@ const (
 )
 
 // disk is the service's directory: one file per collection, named by
-// its id, and the alias table. Every write replaces its file atomically.
-type disk struct{ dir string }
+// its id, and the alias table. Every write replaces its file atomically and
+// is durable when it returns, so it happens outside the service's lock.
+type disk struct {
+	dir   string
+	write func(path string, data []byte, perm os.FileMode) error
+}
 
 func (d disk) ensure() error {
 	if err := os.MkdirAll(d.dir, 0o700); err != nil {
@@ -61,7 +63,7 @@ func (d disk) save(id string, data []byte) error {
 	if err := d.ensure(); err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(d.path(id), data, 0o600)
+	return d.write(d.path(id), data, 0o600)
 }
 
 func (d disk) remove(id string) error {
@@ -91,15 +93,19 @@ func (d disk) loadAliases() (map[string]string, error) {
 	return aliases, nil
 }
 
-func (d disk) saveAliases(aliases map[string]string) error {
+func encodeAliases(aliases map[string]string) ([]byte, error) {
+	data, err := json.Marshal(aliases)
+	if err != nil {
+		return nil, fmt.Errorf("encode aliases: %w", err)
+	}
+	return data, nil
+}
+
+func (d disk) saveAliases(data []byte) error {
 	if err := d.ensure(); err != nil {
 		return err
 	}
-	data, err := json.Marshal(aliases)
-	if err != nil {
-		return fmt.Errorf("encode aliases: %w", err)
-	}
-	return atomicfile.WriteFile(filepath.Join(d.dir, aliasesFile), data, 0o600)
+	return d.write(filepath.Join(d.dir, aliasesFile), data, 0o600)
 }
 
 // validID is a collection id or alias: a non-empty object path element.

@@ -18,7 +18,7 @@ var t0 = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 
 func newTestCollection(t *testing.T, password string) *Collection {
 	t.Helper()
-	c, err := New("Login", []byte(password), testKDF, t0)
+	c, err := New("Login", []byte(password), testKDF, Argon2id, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +470,7 @@ func TestSecretsAreBoundToTheirItem(t *testing.T) {
 }
 
 func FuzzParse(f *testing.F) {
-	c, _ := New("L", []byte("pw"), testKDF, t0)
+	c, _ := New("L", []byte("pw"), testKDF, Argon2id, t0)
 	_, _, _ = c.CreateItem("a", map[string]string{"k": "v"}, []byte("s"), "", false, t0)
 	good, _ := c.Marshal()
 	f.Add(good)

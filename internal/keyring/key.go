@@ -24,6 +24,16 @@ type KDF struct {
 	Threads uint8
 }
 
+// Stretch turns a password into key material. It is slow on purpose, so it runs
+// outside whatever lock a caller of this package holds; Argon2id is what every
+// real key uses.
+type Stretch func(password, salt []byte, kdf KDF) []byte
+
+// Argon2id is the Stretch of every real key.
+func Argon2id(password, salt []byte, kdf KDF) []byte {
+	return argon2.IDKey(password, salt, kdf.Time, kdf.MemKiB, kdf.Threads, keyLen)
+}
+
 // DefaultKDF is RFC 9106's second recommended option: 3 passes over
 // 64 MiB.
 var DefaultKDF = KDF{Time: 3, MemKiB: 64 * 1024, Threads: 4}
@@ -76,14 +86,14 @@ func newKey() (*key, error) {
 	return &key{page: page}, nil
 }
 
-// deriveKey stretches password with salt under kdf. Argon2 hands back a
+// deriveKey stretches password with salt under kdf. Stretching hands back a
 // heap slice; it is copied into the key's page and zeroed.
-func deriveKey(password, salt []byte, kdf KDF) (*key, error) {
+func deriveKey(password, salt []byte, kdf KDF, stretch Stretch) (*key, error) {
 	k, err := newKey()
 	if err != nil {
 		return nil, err
 	}
-	derived := argon2.IDKey(password, salt, kdf.Time, kdf.MemKiB, kdf.Threads, keyLen)
+	derived := stretch(password, salt, kdf)
 	copy(k.bytes(), derived)
 	clear(derived)
 	return k, nil

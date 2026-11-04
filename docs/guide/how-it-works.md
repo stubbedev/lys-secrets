@@ -49,6 +49,10 @@ underscores. That id is the object path and the file name.
 
 If `lys-secrets` is not running, lys-login unlocks a running gnome-keyring instead.
 
+The service's lock is free while a password's key is derived and while a file is
+written, so a slow Argon2id or `fsync` holds up nobody else's search or read. A
+reply to a change still comes only once the change is durable.
+
 Changing your login password does not re-encrypt the collection, so your new
 password does not open it. Ask for a new collection password with `ChangeLock`,
 then show the prompt it returns:

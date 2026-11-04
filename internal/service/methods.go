@@ -81,20 +81,18 @@ func (m serviceMethods) CreateCollection(props map[string]dbus.Variant, alias st
 			return true, dbus.MakeVariant(noPrompt)
 		}
 		defer clear(password)
-		kr, err := keyring.New(label, password, s.cfg.KDF, s.now())
+		kr, err := keyring.New(label, password, s.cfg.KDF, s.cfg.Stretch, s.now())
 		if err != nil {
 			log.Printf("secrets: create collection %q: %v", label, err)
 			return true, dbus.MakeVariant(noPrompt)
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		id := idFor(label, func(id string) bool { _, taken := s.colls[id]; return taken })
-		if err := s.addCollectionLocked(id, kr); err != nil {
-			log.Printf("secrets: create collection %s: %v", id, err)
+		id, err := s.addCollection(func(taken func(string) bool) string { return idFor(label, taken) }, kr)
+		if err != nil {
+			log.Printf("secrets: create collection %q: %v", label, err)
 			return true, dbus.MakeVariant(noPrompt)
 		}
 		if alias != "" {
-			if err := s.setAliasLocked(alias, id); err != nil {
+			if err := s.setAlias(alias, id); err != nil {
 				log.Printf("secrets: alias %s: %v", alias, err)
 			}
 		}
@@ -198,9 +196,7 @@ func (s *Service) promptUnlock(ctx context.Context, id string) bool {
 			logPromptErr("unlock "+id, err)
 			return false
 		}
-		s.mu.Lock()
-		err = s.unlockLocked(c, password)
-		s.mu.Unlock()
+		err = s.unlock(c, password)
 		clear(password)
 		switch {
 		case err == nil:
@@ -263,14 +259,13 @@ func (m serviceMethods) ChangeLock(collection dbus.ObjectPath) (dbus.ObjectPath,
 			return true, dbus.MakeVariant("")
 		}
 		defer clear(password)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if err := c.kr.ChangePassword(password, s.cfg.KDF); err != nil {
+		rekey, err := keyring.NewRekey(password, s.cfg.KDF, s.cfg.Stretch)
+		if err != nil {
 			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}
-		if err := s.saveLocked(c); err != nil {
-			log.Printf("secrets: %v", err)
+		if err := s.change(c, func() error { return c.kr.ChangeKey(rekey) }, nothingToAnnounce); err != nil {
+			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}
 		return false, dbus.MakeVariant("")
@@ -335,22 +330,25 @@ func (m serviceMethods) SetAlias(name string, collection dbus.ObjectPath) *dbus.
 		return dbusx.InvalidArgs("invalid alias " + name)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if current, ok := s.colls[s.aliases[name]]; ok && current.kr.Locked() {
+		s.mu.Unlock()
 		return lockedErr(keyring.ErrLocked)
 	}
 	id := ""
 	if collection != noPrompt {
 		c, item, ok := s.resolveLocked(collection)
 		if !ok || item != 0 {
+			s.mu.Unlock()
 			return noSuchObject(collection)
 		}
 		if c.kr.Locked() {
+			s.mu.Unlock()
 			return lockedErr(keyring.ErrLocked)
 		}
 		id = c.id
 	}
-	if err := s.setAliasLocked(name, id); err != nil {
+	s.mu.Unlock()
+	if err := s.setAlias(name, id); err != nil {
 		return dbusx.Failed(err.Error())
 	}
 	return nil
@@ -375,27 +373,46 @@ func (m collectionMethods) collection() (*collection, *dbus.Error) {
 func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	s := m.s
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	c, derr := m.collection()
 	if derr != nil {
+		s.mu.Unlock()
 		return "", derr
 	}
 	if c.kr.Locked() {
+		s.mu.Unlock()
 		return "", lockedErr(keyring.ErrLocked)
 	}
-	if err := s.disk.remove(c.id); err != nil {
+	s.mu.Unlock()
+	if err := c.writes.write(noMoreWrites, func() error { return s.disk.remove(c.id) }); err != nil {
 		return "", dbusx.Failed(err.Error())
+	}
+	s.mu.Lock()
+	if s.colls[c.id] != c {
+		s.mu.Unlock()
+		return noPrompt, nil
 	}
 	c.kr.Destroy()
 	c.unexport()
 	delete(s.colls, c.id)
+	var aliases []string
 	for alias, id := range s.aliases {
 		if id == c.id {
-			if err := s.setAliasLocked(alias, ""); err != nil {
-				log.Printf("secrets: drop alias %s: %v", alias, err)
-			}
+			aliases = append(aliases, alias)
 		}
 	}
+	s.mu.Unlock()
+	if len(aliases) > 0 {
+		err := s.changeAliases(aliases, func() {
+			for _, alias := range aliases {
+				delete(s.aliases, alias)
+			}
+		})
+		if err != nil {
+			log.Printf("secrets: drop aliases %v: %v", aliases, err)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.emitLocked(rootPath, ifaceService+".CollectionDeleted", collectionPath(c.id))
 	return noPrompt, nil
 }
@@ -449,37 +466,40 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 	}
 	create := func() (dbus.ObjectPath, *dbus.Error) {
 		defer clear(value)
-		id, created, err := c.kr.CreateItem(label, attrs, value, secret.ContentType, replace, s.now())
+		var id uint32
+		var created bool
+		err := s.change(c, func() error {
+			var err error
+			id, created, err = c.kr.CreateItem(label, attrs, value, secret.ContentType, replace, s.now())
+			return err
+		}, func() error {
+			path := itemPath(c.id, id)
+			if !created {
+				s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", path)
+				return nil
+			}
+			if err := s.exportItemLocked(c, id); err != nil {
+				return err
+			}
+			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemCreated", path)
+			return nil
+		})
 		if err != nil {
 			return "", lockedErr(err)
 		}
-		if err := s.saveLocked(c); err != nil {
-			return "", dbusx.Failed(err.Error())
-		}
-		path := itemPath(c.id, id)
-		if created {
-			if err := s.exportItemLocked(c, id); err != nil {
-				return "", dbusx.Failed(err.Error())
-			}
-			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemCreated", path)
-		} else {
-			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", path)
-		}
-		return path, nil
+		return itemPath(c.id, id), nil
 	}
-	if !c.kr.Locked() {
-		defer s.mu.Unlock()
+	locked := c.kr.Locked()
+	s.mu.Unlock()
+	if !locked {
 		path, derr := create()
 		return path, noPrompt, derr
 	}
-	s.mu.Unlock()
 	prompt, derr := s.newPrompt(func(ctx context.Context) (bool, dbus.Variant) {
 		if !s.promptUnlock(ctx, c.id) {
 			clear(value)
 			return true, dbus.MakeVariant(noPrompt)
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
 		path, derr := create()
 		if derr != nil {
 			log.Printf("secrets: create an item in %s: %v", c.id, derr)
@@ -505,22 +525,22 @@ type itemMethods struct {
 func (m itemMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	s := m.s
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	c, ok := s.colls[m.cid]
+	s.mu.Unlock()
 	if !ok {
 		return "", noSuchObject(itemPath(m.cid, m.id))
 	}
-	if err := c.kr.DeleteItem(m.id, s.now()); err != nil {
+	err := s.change(c, func() error { return c.kr.DeleteItem(m.id, s.now()) }, func() error {
+		if off := c.items[m.id]; off != nil {
+			off()
+			delete(c.items, m.id)
+		}
+		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemDeleted", itemPath(c.id, m.id))
+		return nil
+	})
+	if err != nil {
 		return "", lockedErr(err)
 	}
-	if err := s.saveLocked(c); err != nil {
-		return "", dbusx.Failed(err.Error())
-	}
-	if off := c.items[m.id]; off != nil {
-		off()
-		delete(c.items, m.id)
-	}
-	s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemDeleted", itemPath(c.id, m.id))
 	return noPrompt, nil
 }
 
@@ -544,27 +564,29 @@ func (m itemMethods) GetSecret(sender dbus.Sender, sessPath dbus.ObjectPath) (Se
 func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 	s := m.s
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess, derr := s.sessionLocked(secret.Session, sender)
 	if derr != nil {
+		s.mu.Unlock()
 		return derr
 	}
 	c, ok := s.colls[m.cid]
 	if !ok {
+		s.mu.Unlock()
 		return noSuchObject(itemPath(m.cid, m.id))
 	}
 	value, err := sess.t.decode(secret.Parameters, secret.Value)
+	s.mu.Unlock()
 	if err != nil {
 		return dbusx.InvalidArgs("decode the secret: " + err.Error())
 	}
 	defer clear(value)
-	if err := c.kr.SetSecret(m.id, value, secret.ContentType, s.now()); err != nil {
+	err = s.change(c, func() error { return c.kr.SetSecret(m.id, value, secret.ContentType, s.now()) }, func() error {
+		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, m.id))
+		return nil
+	})
+	if err != nil {
 		return lockedErr(err)
 	}
-	if err := s.saveLocked(c); err != nil {
-		return dbusx.Failed(err.Error())
-	}
-	s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, m.id))
 	return nil
 }
 

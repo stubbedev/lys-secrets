@@ -142,7 +142,7 @@ func run(o options) error {
 	defer bw.Lock()
 
 	svc, err := service.Start(conn, service.Config{
-		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Prompter: prompt.New(conn),
+		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Stretch: keyring.Argon2id, Prompter: prompt.New(conn),
 		Vault:     vaultCollection{bw: bw, folder: o.vaultFolder},
 		LockAfter: o.collectionLockAfter,
 	})

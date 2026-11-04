@@ -91,7 +91,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) start(t *testing.T) {
 	t.Helper()
-	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter})
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestSecretToolCreatesTheDefaultCollection(t *testing.T) {
 	if _, err := run(t, "v", tool, "store", "--label=x", "k", "v"); err == nil {
 		t.Error("store with a dismissed creation prompt succeeded")
 	}
-	if ids, _ := (disk{f2.dir}).ids(); len(ids) != 0 {
+	if ids, _ := (disk{dir: f2.dir}).ids(); len(ids) != 0 {
 		t.Errorf("a dismissed creation left collections %v", ids)
 	}
 }
@@ -313,7 +313,7 @@ func TestStartLeavesAnotherProviderAlone(t *testing.T) {
 	if _, err := other.RequestName(BusName, dbus.NameFlagDoNotQueue); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Prompter: &fakePrompter{}})
+	_, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Stretch: keyring.Argon2id, Prompter: &fakePrompter{}})
 	if !errors.Is(err, dbusx.ErrNameTaken) {
 		t.Fatalf("Start = %v, want dbusx.ErrNameTaken", err)
 	}
@@ -395,7 +395,7 @@ func TestFailedStartLeavesNothingExported(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn := f.bus.Conn(t)
-	if _, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, Vault: &fakeVault{changed: func() {}}}); !errors.Is(err, dbusx.ErrNameTaken) {
+	if _, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, Vault: &fakeVault{changed: func() {}}}); !errors.Is(err, dbusx.ErrNameTaken) {
 		t.Fatalf("Start = %v, want dbusx.ErrNameTaken", err)
 	}
 	client := f.bus.Conn(t)
@@ -407,7 +407,7 @@ func TestFailedStartLeavesNothingExported(t *testing.T) {
 	if _, err := other.ReleaseName(BusName); err != nil {
 		t.Fatal(err)
 	}
-	svc, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter})
+	svc, err := Start(conn, Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter})
 	if err != nil {
 		t.Fatalf("Start again on the same connection = %v", err)
 	}

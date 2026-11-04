@@ -12,6 +12,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
+	"github.com/stubbedev/lys-secrets/internal/keyring"
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
@@ -76,7 +77,7 @@ func vaultFixture(t *testing.T) (*fixture, *fakeVault) {
 		passwords: map[string]string{"0b6c9e1a-0000-4000-8000-000000000001": "mail-pw", "0b6c9e1a-0000-4000-8000-000000000002": "chat-pw"},
 	}
 	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}}
-	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, Vault: v})
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, Vault: v})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func TestVaultCollectionRefusesAClash(t *testing.T) {
 	}
 	f.svc.mu.Unlock()
 	f.svc.Close()
-	_, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, Vault: &fakeVault{changed: func() {}}})
+	_, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, Vault: &fakeVault{changed: func() {}}})
 	if err == nil || !strings.Contains(err.Error(), VaultID) {
 		t.Errorf("Start = %v, want the clash", err)
 	}
@@ -292,7 +293,7 @@ func TestVaultSearchMatchesTheExportedAttributes(t *testing.T) {
 func TestLockServiceLocksAVaultNotShownAsACollection(t *testing.T) {
 	v := &fakeVault{hidden: true, open: true, changed: func() {}}
 	bus := dbustest.Session(t)
-	svc, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Prompter: &fakePrompter{}, Vault: v})
+	svc, err := Start(bus.Conn(t), Config{Dir: t.TempDir(), KDF: testKDF, Stretch: keyring.Argon2id, Prompter: &fakePrompter{}, Vault: v})
 	if err != nil {
 		t.Fatal(err)
 	}

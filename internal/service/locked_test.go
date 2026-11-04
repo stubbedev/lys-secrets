@@ -386,7 +386,7 @@ func TestUnlockingLetsTheAliasMove(t *testing.T) {
 func idleFixture(t *testing.T, after time.Duration, now func() time.Time) (*fixture, *dbus.Conn, dbus.ObjectPath) {
 	t.Helper()
 	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}}
-	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, LockAfter: after, Now: now})
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, LockAfter: after, Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestAnIdleCollectionLocksByItself(t *testing.T) {
 
 func TestANewEmptyCollectionLocksWhenIdleToo(t *testing.T) {
 	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}}
-	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Prompter: f.prompter, LockAfter: 50 * time.Millisecond})
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, LockAfter: 50 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

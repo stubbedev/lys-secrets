@@ -120,12 +120,12 @@ type Collection struct {
 }
 
 // New creates an unlocked collection whose key derives from password.
-func New(label string, password []byte, kdf KDF, now time.Time) (*Collection, error) {
+func New(label string, password []byte, kdf KDF, stretch Stretch, now time.Time) (*Collection, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return nil, fmt.Errorf("keyring: salt: %w", err)
 	}
-	k, err := deriveKey(password, salt, kdf)
+	k, err := deriveKey(password, salt, kdf, stretch)
 	if err != nil {
 		return nil, err
 	}
@@ -227,75 +227,140 @@ type itemJSON struct {
 	Modified    int64             `json:"modified"`
 }
 
-// Unlock derives the key from password and opens the body. A wrong
-// password is ErrWrongPassword, a changed file ErrTampered, and either
-// leaves the collection locked; a body that opens but does not match its
-// header is corruption.
-func (c *Collection) Unlock(password []byte) error {
-	if c.key != nil {
-		return nil
-	}
+// Opening is what unlocking a locked collection needs of it, taken under the
+// lock that guards the collection and used outside it, since deriving the key
+// takes as long as the KDF makes it.
+type Opening struct {
+	salt   []byte
+	kdf    KDF
+	check  []byte
+	body   []byte
+	header []byte
+}
+
+// BeginUnlock starts unlocking a locked collection.
+func (c *Collection) BeginUnlock() (*Opening, error) {
 	if c.body == nil {
-		return errors.New("keyring: the collection was destroyed or failed to lock, so it opens only from its file")
+		return nil, errors.New("keyring: the collection was destroyed or failed to lock, so it opens only from its file")
 	}
-	k, err := deriveKey(password, c.salt, c.kdf)
+	return &Opening{salt: c.salt, kdf: c.kdf, check: c.check, body: c.body, header: c.header()}, nil
+}
+
+// Opened is a collection's unlocked state, its secrets sealed again under the
+// key, waiting for FinishUnlock. Whoever gives up on one calls Discard.
+type Opened struct {
+	key     *key
+	from    []byte
+	label   string
+	created int64
+	mod     int64
+	items   []openedItem
+}
+
+type openedItem struct {
+	Item
+	sealed []byte
+}
+
+// Open derives the key from password and opens the body. A wrong password is
+// ErrWrongPassword and a changed file ErrTampered. No plain secret outlives it,
+// whatever happens.
+func (o *Opening) Open(password []byte, stretch Stretch) (*Opened, error) {
+	k, err := deriveKey(password, o.salt, o.kdf, stretch)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if c.check != nil {
-		if _, err := k.open(c.check, keyCheckAD); err != nil {
-			k.destroy()
-			return ErrWrongPassword
-		}
-	}
-	plain, err := k.open(c.body, c.header())
+	opened, err := o.read(k)
 	if err != nil {
 		k.destroy()
-		switch {
-		case c.check != nil:
-			return fmt.Errorf("%w: %w", ErrTampered, err)
-		case errors.Is(err, errOpen):
-			return ErrWrongPassword
+		return nil, err
+	}
+	return opened, nil
+}
+
+func (o *Opening) read(k *key) (*Opened, error) {
+	if o.check != nil {
+		if _, err := k.open(o.check, keyCheckAD); err != nil {
+			return nil, ErrWrongPassword
 		}
-		return fmt.Errorf("keyring: corrupt body: %w", err)
+	}
+	plain, err := k.open(o.body, o.header)
+	if err != nil {
+		switch {
+		case o.check != nil:
+			return nil, fmt.Errorf("%w: %w", ErrTampered, err)
+		case errors.Is(err, errOpen):
+			return nil, ErrWrongPassword
+		}
+		return nil, fmt.Errorf("keyring: corrupt body: %w", err)
 	}
 	defer clear(plain)
 	var body bodyJSON
 	if err := json.Unmarshal(plain, &body); err != nil {
-		k.destroy()
-		return fmt.Errorf("keyring: corrupt body: %w", err)
+		return nil, fmt.Errorf("keyring: corrupt body: %w", err)
 	}
-	if err := c.adopt(k, body); err != nil {
-		k.destroy()
+	items := make([]openedItem, len(body.Items))
+	for i, it := range body.Items {
+		items[i] = openedItem{
+			ID: it.ID, Label: it.Label, Attributes: it.Attributes, ContentType: it.ContentType,
+			Created: time.Unix(it.Created, 0).UTC(), Modified: time.Unix(it.Modified, 0).UTC(),
+			sealed: k.seal(it.Secret, itemAD(it.ID)),
+		}
+		clear(it.Secret)
+		if items[i].Attributes == nil {
+			items[i].Attributes = map[string]string{}
+		}
+	}
+	return &Opened{key: k, from: o.body, label: body.Label, created: body.Created, mod: body.Modified, items: items}, nil
+}
+
+// Discard destroys the key of an Opened nothing will use.
+func (o *Opened) Discard() {
+	o.key.destroy()
+}
+
+// ErrChanged is an unlock finishing on a collection that is no longer what it
+// began on.
+var ErrChanged = errors.New("keyring: the collection changed while it was unlocking")
+
+// FinishUnlock makes the collection unlocked with what Open found, under the
+// lock that guards it. A collection already unlocked stays as it is, and one
+// changed since BeginUnlock is ErrChanged; either way o is used up. A body that
+// opens but does not match the header is corruption.
+func (c *Collection) FinishUnlock(o *Opened) error {
+	if c.key != nil {
+		o.Discard()
+		return nil
+	}
+	if c.body == nil || !bytes.Equal(c.body, o.from) {
+		o.Discard()
+		return ErrChanged
+	}
+	if err := c.adopt(o); err != nil {
+		o.Discard()
 		return err
 	}
 	c.body = nil
 	return nil
 }
 
-func (c *Collection) adopt(k *key, body bodyJSON) error {
-	if len(body.Items) != len(c.entries) {
-		return fmt.Errorf("keyring: corrupt body: %d items, the header lists %d", len(body.Items), len(c.entries))
+func (c *Collection) adopt(o *Opened) error {
+	if len(o.items) != len(c.entries) {
+		return fmt.Errorf("keyring: corrupt body: %d items, the header lists %d", len(o.items), len(c.entries))
 	}
-	for _, it := range body.Items {
-		e, ok := c.entries[it.ID]
-		if !ok {
+	for _, it := range o.items {
+		if _, ok := c.entries[it.ID]; !ok {
 			return fmt.Errorf("keyring: corrupt body: item %d is not in the header", it.ID)
 		}
-		e.Item = Item{
-			ID: it.ID, Label: it.Label, Attributes: it.Attributes, ContentType: it.ContentType,
-			Created: time.Unix(it.Created, 0).UTC(), Modified: time.Unix(it.Modified, 0).UTC(),
-		}
-		if e.Attributes == nil {
-			e.Attributes = map[string]string{}
-		}
-		e.sealed = k.seal(it.Secret, itemAD(it.ID))
-		clear(it.Secret)
 	}
-	c.label, c.created, c.mod = body.Label, time.Unix(body.Created, 0).UTC(), time.Unix(body.Modified, 0).UTC()
-	c.key = k
+	for _, it := range o.items {
+		e := c.entries[it.ID]
+		e.Item, e.sealed = it.Item, it.sealed
+	}
+	c.label, c.created, c.mod = o.label, time.Unix(o.created, 0).UTC(), time.Unix(o.mod, 0).UTC()
+	c.key = o.key
 	if c.check == nil {
-		c.check = k.seal(nil, keyCheckAD)
+		c.check = o.key.seal(nil, keyCheckAD)
 	}
 	return nil
 }
@@ -381,30 +446,53 @@ func (c *Collection) Marshal() ([]byte, error) {
 	return append(c.header(), body...), nil
 }
 
-// ChangePassword re-keys an unlocked collection with a fresh salt.
-func (c *Collection) ChangePassword(password []byte, kdf KDF) error {
-	if c.key == nil {
-		return ErrLocked
-	}
+// Rekey is a new key for a collection, derived outside the lock that guards it.
+// Whoever gives up on one calls Discard.
+type Rekey struct {
+	key  *key
+	salt []byte
+	kdf  KDF
+}
+
+// NewRekey derives a new key from password with a fresh salt.
+func NewRekey(password []byte, kdf KDF, stretch Stretch) (*Rekey, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
-		return fmt.Errorf("keyring: salt: %w", err)
+		return nil, fmt.Errorf("keyring: salt: %w", err)
 	}
-	k, err := deriveKey(password, salt, kdf)
+	k, err := deriveKey(password, salt, kdf, stretch)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return &Rekey{key: k, salt: salt, kdf: kdf}, nil
+}
+
+// Discard destroys a new key nothing will use.
+func (r *Rekey) Discard() {
+	r.key.destroy()
+}
+
+// ChangeKey moves an unlocked collection to the new key; r is used up.
+func (c *Collection) ChangeKey(r *Rekey) error {
+	if c.key == nil {
+		r.Discard()
+		return ErrLocked
+	}
+	sealed := make(map[uint32][]byte, len(c.entries))
 	for id, e := range c.entries {
 		secret, err := c.key.open(e.sealed, itemAD(id))
 		if err != nil {
-			k.destroy()
+			r.Discard()
 			return fmt.Errorf("keyring: item %d's secret does not open: %w", id, err)
 		}
-		e.sealed = k.seal(secret, itemAD(id))
+		sealed[id] = r.key.seal(secret, itemAD(id))
 		clear(secret)
 	}
+	for id, e := range c.entries {
+		e.sealed = sealed[id]
+	}
 	c.key.destroy()
-	c.key, c.salt, c.kdf, c.check = k, salt, kdf, k.seal(nil, keyCheckAD)
+	c.key, c.salt, c.kdf, c.check = r.key, r.salt, r.kdf, r.key.seal(nil, keyCheckAD)
 	return nil
 }
 

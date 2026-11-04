@@ -6,7 +6,7 @@ import (
 )
 
 func BenchmarkSearch(b *testing.B) {
-	c, err := New("Login", []byte("pw"), testKDF, t0)
+	c, err := New("Login", []byte("pw"), testKDF, Argon2id, t0)
 	if err != nil {
 		b.Fatal(err)
 	}
