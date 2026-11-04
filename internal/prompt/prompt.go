@@ -6,6 +6,7 @@ package prompt
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/stubbedev/lys-lib/portaldialogs"
@@ -15,15 +16,14 @@ import (
 // Dialogs is a service.Prompter over the shell's dialogs.
 type Dialogs struct {
 	client *portaldialogs.Client
-	seq    uint64
+	seq    atomic.Uint64
 }
 
 // New prompts through the dialog host on conn.
 func New(conn *dbus.Conn) *Dialogs { return &Dialogs{client: portaldialogs.NewClient(conn)} }
 
 func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]byte, bool, error) {
-	d.seq++
-	caller := portaldialogs.Caller{Handle: fmt.Sprintf("/dev/stubbe/lys/secrets/prompt/%d", d.seq)}
+	caller := portaldialogs.Caller{Handle: fmt.Sprintf("/dev/stubbe/lys/secrets/prompt/%d", d.seq.Add(1))}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
