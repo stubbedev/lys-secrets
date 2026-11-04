@@ -241,13 +241,16 @@ func TestAReadCompletesWhileASaveIsPendingAndTheReplyWaitsForTheDisk(t *testing.
 	disk, writes := slowDisk(f.svc)
 	saved := make(chan error, 1)
 	go func() {
-		saved <- f.svc.change(c, func() error {
-			_, _, err := c.kr.CreateItem("label", map[string]string{"a": "b"}, []byte("secret"), "text/plain", false, f.svc.now())
+		saved <- f.svc.change(c, func(kr *keyring.Collection) error {
+			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("secret"), "text/plain", false, f.svc.now())
 			return err
 		}, nothingToAnnounce)
 	}()
 	disk.reached(t, "the save")
 	f.search(t)
+	if found := f.find(t, map[string]string{"a": "b"}); len(found) != 0 {
+		t.Errorf("a read during the write saw %v, a change a crash would still undo", found)
+	}
 	select {
 	case err := <-saved:
 		t.Fatalf("the change returned %v before its data reached the disk", err)
@@ -285,9 +288,22 @@ func TestAReadCompletesWhileASaveIsPendingAndTheReplyWaitsForTheDisk(t *testing.
 	if strings.Contains(string(data), "secret") {
 		t.Error("the secret reached the disk in the clear")
 	}
+	if found := f.find(t, map[string]string{"a": "b"}); len(found) != 1 {
+		t.Errorf("a read after the write sees %v, want the new item", found)
+	}
 }
 
-func TestSavesReachTheDiskInOrderAndAnOlderOneNeverOverwritesANewer(t *testing.T) {
+// find is SearchItems's unlocked items.
+func (f *stallFixture) find(t *testing.T, attrs map[string]string) []dbus.ObjectPath {
+	t.Helper()
+	unlocked, _, derr := serviceMethods{f.svc}.SearchItems(attrs)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	return unlocked
+}
+
+func TestChangesToOneCollectionReachTheDiskInTheOrderTheyCommit(t *testing.T) {
 	f := newStallFixture(t)
 	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
 		t.Fatal(err)
@@ -295,26 +311,22 @@ func TestSavesReachTheDiskInOrderAndAnOlderOneNeverOverwritesANewer(t *testing.T
 	f.svc.mu.Lock()
 	c := f.svc.colls[LoginID]
 	f.svc.mu.Unlock()
-	f.svc.mu.Lock()
-	older, err := f.svc.sealLocked(c)
-	if err != nil {
-		f.svc.mu.Unlock()
-		t.Fatal(err)
+	disk, _ := slowDisk(f.svc)
+	done := make(chan error, 2)
+	add := func(name string) {
+		done <- f.svc.change(c, func(kr *keyring.Collection) error {
+			_, _, err := kr.CreateItem(name, map[string]string{"n": name}, []byte(name), "text/plain", false, f.svc.now())
+			return err
+		}, nothingToAnnounce)
 	}
-	if _, _, err := c.kr.CreateItem("label", map[string]string{"a": "b"}, []byte("s"), "text/plain", false, f.svc.now()); err != nil {
-		f.svc.mu.Unlock()
-		t.Fatal(err)
-	}
-	newer, err := f.svc.sealLocked(c)
-	f.svc.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := newer.write(); err != nil {
-		t.Fatal(err)
-	}
-	if err := older.write(); err != nil {
-		t.Fatal(err)
+	go add("first")
+	disk.reached(t, "the first write")
+	go add("second")
+	close(disk.release)
+	for range 2 {
+		if err := finished(t, "a change", done); err != nil {
+			t.Fatal(err)
+		}
 	}
 	data, err := os.ReadFile(f.svc.disk.path(LoginID))
 	if err != nil {
@@ -324,8 +336,44 @@ func TestSavesReachTheDiskInOrderAndAnOlderOneNeverOverwritesANewer(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(onDisk.IDs()); got != 1 {
-		t.Errorf("%d items on disk: the older state overwrote the newer", got)
+	if got := len(onDisk.IDs()); got != 2 {
+		t.Errorf("%d items on disk after two changes: one overwrote the other", got)
+	}
+}
+
+func TestALockDuringAWriteLeavesTheChangeOnDiskAndTheCollectionLocked(t *testing.T) {
+	f := newStallFixture(t)
+	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.mu.Lock()
+	c := f.svc.colls[LoginID]
+	f.svc.mu.Unlock()
+	disk, _ := slowDisk(f.svc)
+	saved := make(chan error, 1)
+	go func() {
+		saved <- f.svc.change(c, func(kr *keyring.Collection) error {
+			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("s"), "text/plain", false, f.svc.now())
+			return err
+		}, nothingToAnnounce)
+	}()
+	disk.reached(t, "the save")
+	f.svc.LockCollections()
+	close(disk.release)
+	if err := finished(t, "the save", saved); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.mu.Lock()
+	locked := c.kr.Locked()
+	f.svc.mu.Unlock()
+	if !locked {
+		t.Fatal("a collection locked during a write came back unlocked")
+	}
+	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	if found := f.find(t, map[string]string{"a": "b"}); len(found) != 1 {
+		t.Errorf("after unlocking again the change shows as %v", found)
 	}
 }
 
@@ -339,6 +387,9 @@ func TestAnAliasSaveHoldsNoLock(t *testing.T) {
 	go func() { done <- serviceMethods{f.svc}.SetAlias("other", collectionPath(LoginID)) }()
 	disk.reached(t, "the alias save")
 	f.search(t)
+	if got, _ := (serviceMethods{f.svc}).ReadAlias("other"); got != noPrompt {
+		t.Errorf("a read during the write sees the alias at %s, which a crash would still undo", got)
+	}
 	close(disk.release)
 	if err := finished(t, "the alias", done); err != nil {
 		t.Fatal(err)
@@ -352,23 +403,31 @@ func TestAnAliasSaveHoldsNoLock(t *testing.T) {
 	}
 }
 
-func TestADeletedCollectionStaysDeletedPastASaveInFlight(t *testing.T) {
+func TestADeleteWaitsForAChangeInFlightAndStaysDeleted(t *testing.T) {
 	f := newStallFixture(t)
 	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
 	f.svc.mu.Lock()
 	c := f.svc.colls[LoginID]
-	save, err := f.svc.sealLocked(c)
 	f.svc.mu.Unlock()
-	if err != nil {
+	disk, _ := slowDisk(f.svc)
+	saved := make(chan error, 1)
+	go func() {
+		saved <- f.svc.change(c, func(kr *keyring.Collection) error { return kr.SetLabel("renamed", f.svc.now()) }, nothingToAnnounce)
+	}()
+	disk.reached(t, "the save")
+	deleted := make(chan *dbus.Error, 1)
+	go func() {
+		_, derr := (collectionMethods{f.svc, LoginID}).Delete()
+		deleted <- derr
+	}()
+	close(disk.release)
+	if err := finished(t, "the save", saved); err != nil {
 		t.Fatal(err)
 	}
-	if _, derr := (collectionMethods{f.svc, LoginID}).Delete(); derr != nil {
+	if derr := finished(t, "the delete", deleted); derr != nil {
 		t.Fatal(derr)
-	}
-	if err := save.write(); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.svc.disk.path(LoginID)); !os.IsNotExist(err) {
 		t.Errorf("the file of a deleted collection: %v", err)
@@ -401,8 +460,8 @@ func TestABlockedBusHoldsNoRead(t *testing.T) {
 	f.svc.signals = queue
 	f.svc.mu.Unlock()
 	for i, name := range []string{"first", "second", "third"} {
-		err := f.svc.change(c, func() error {
-			return c.kr.SetLabel(name, f.svc.now())
+		err := f.svc.change(c, func(kr *keyring.Collection) error {
+			return kr.SetLabel(name, f.svc.now())
 		}, func() error {
 			f.svc.emitLocked(rootPath, name, i)
 			return nil

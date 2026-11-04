@@ -54,12 +54,10 @@ written, so a slow Argon2id or `fsync` holds up nobody else's search or read, an
 signals go out on their own goroutine, in order, so a stalled bus holds up nothing
 either.
 
-A reply to a change, and the signal that announces it, come only once the change
-is durable. Another client reading while that write is in progress sees the change
-already, and a crash in that moment loses it, even though that client read it: until
-the writer has its reply, a read says what the service holds, not what is on disk.
-The same goes for a delete, which a crash can undo. A client that needs a change to
-survive waits for its reply or its signal.
+A change becomes visible only once it is durable: until then every other client
+reads the collection as it is on disk, and the reply and the signal come after. So
+nothing a client reads can be lost to a crash. A collection locked while one of its
+changes is being written stays locked, and holds the change when it is unlocked.
 
 Changing your login password does not re-encrypt the collection, so your new
 password does not open it. Ask for a new collection password with `ChangeLock`,

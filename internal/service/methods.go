@@ -264,7 +264,7 @@ func (m serviceMethods) ChangeLock(collection dbus.ObjectPath) (dbus.ObjectPath,
 			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}
-		if err := s.change(c, func() error { return c.kr.ChangeKey(rekey) }, nothingToAnnounce); err != nil {
+		if err := s.change(c, func(kr *keyring.Collection) error { return kr.ChangeKey(rekey) }, nothingToAnnounce); err != nil {
 			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}
@@ -383,7 +383,9 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 		return "", lockedErr(keyring.ErrLocked)
 	}
 	s.mu.Unlock()
-	if err := c.writes.write(noMoreWrites, func() error { return s.disk.remove(c.id) }); err != nil {
+	c.writer.Lock()
+	defer c.writer.Unlock()
+	if err := s.disk.remove(c.id); err != nil {
 		return "", dbusx.Failed(err.Error())
 	}
 	s.mu.Lock()
@@ -402,9 +404,9 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	}
 	s.mu.Unlock()
 	if len(aliases) > 0 {
-		err := s.changeAliases(aliases, func() {
+		err := s.changeAliases(aliases, func(table map[string]string) {
 			for _, alias := range aliases {
-				delete(s.aliases, alias)
+				delete(table, alias)
 			}
 		})
 		if err != nil {
@@ -468,9 +470,9 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 		defer clear(value)
 		var id uint32
 		var created bool
-		err := s.change(c, func() error {
+		err := s.change(c, func(kr *keyring.Collection) error {
 			var err error
-			id, created, err = c.kr.CreateItem(label, attrs, value, secret.ContentType, replace, s.now())
+			id, created, err = kr.CreateItem(label, attrs, value, secret.ContentType, replace, s.now())
 			return err
 		}, func() error {
 			path := itemPath(c.id, id)
@@ -530,7 +532,7 @@ func (m itemMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	if !ok {
 		return "", noSuchObject(itemPath(m.cid, m.id))
 	}
-	err := s.change(c, func() error { return c.kr.DeleteItem(m.id, s.now()) }, func() error {
+	err := s.change(c, func(kr *keyring.Collection) error { return kr.DeleteItem(m.id, s.now()) }, func() error {
 		if off := c.items[m.id]; off != nil {
 			off()
 			delete(c.items, m.id)
@@ -580,7 +582,7 @@ func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 		return dbusx.InvalidArgs("decode the secret: " + err.Error())
 	}
 	defer clear(value)
-	err = s.change(c, func() error { return c.kr.SetSecret(m.id, value, secret.ContentType, s.now()) }, func() error {
+	err = s.change(c, func(kr *keyring.Collection) error { return kr.SetSecret(m.id, value, secret.ContentType, s.now()) }, func() error {
 		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, m.id))
 		return nil
 	})

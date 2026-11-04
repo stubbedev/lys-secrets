@@ -472,7 +472,38 @@ func (r *Rekey) Discard() {
 	r.key.destroy()
 }
 
-// ChangeKey moves an unlocked collection to the new key; r is used up.
+// Clone is a copy of an unlocked collection to change while c goes on serving
+// reads. It shares c's key: Commit or Discard ends it.
+func (c *Collection) Clone() *Collection {
+	next := *c
+	next.entries = make(map[uint32]*entry, len(c.entries))
+	for id, e := range c.entries {
+		copied := *e
+		copied.Attributes = maps.Clone(e.Attributes)
+		copied.hashes = slices.Clone(e.hashes)
+		next.entries[id] = &copied
+	}
+	return &next
+}
+
+// Commit makes next, a Clone of c, the collection, destroying c's key if next
+// moved to another one; c is not used again.
+func (c *Collection) Commit(next *Collection) {
+	if c.key != next.key {
+		c.key.destroy()
+	}
+}
+
+// Discard drops next, a Clone of c that will not be used, destroying the key it
+// moved to if it moved to one.
+func (c *Collection) Discard(next *Collection) {
+	if c.key != next.key {
+		next.key.destroy()
+	}
+}
+
+// ChangeKey moves an unlocked collection to the new key; r is used up. The old
+// key stays, since a Clone shares it: Commit destroys it.
 func (c *Collection) ChangeKey(r *Rekey) error {
 	if c.key == nil {
 		r.Discard()
@@ -491,7 +522,6 @@ func (c *Collection) ChangeKey(r *Rekey) error {
 	for id, e := range c.entries {
 		e.sealed = sealed[id]
 	}
-	c.key.destroy()
 	c.key, c.salt, c.kdf, c.check = r.key, r.salt, r.kdf, r.key.seal(nil, keyCheckAD)
 	return nil
 }

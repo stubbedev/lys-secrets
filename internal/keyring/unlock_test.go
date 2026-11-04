@@ -25,5 +25,10 @@ func (c *Collection) ChangePassword(password []byte, kdf KDF) error {
 	if err != nil {
 		return err
 	}
-	return c.ChangeKey(r)
+	old := c.Clone()
+	if err := c.ChangeKey(r); err != nil {
+		return err
+	}
+	old.Commit(c)
+	return nil
 }

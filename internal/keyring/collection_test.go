@@ -487,3 +487,53 @@ func FuzzParse(f *testing.F) {
 		_ = back.Unlock([]byte("pw"))
 	})
 }
+
+func TestACloneChangesWithoutTheOriginalAndCommitsOrDiscards(t *testing.T) {
+	c, err := New("Login", []byte("pw"), testKDF, Argon2id, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := c.CreateItem("a", map[string]string{"k": "v"}, []byte("one"), "text/plain", false, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := c.Clone()
+	if err := next.SetItemAttributes(id, map[string]string{"k": "w"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := next.CreateItem("b", nil, []byte("two"), "text/plain", false, t0); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Search(map[string]string{"k": "v"}); len(got) != 1 || len(c.IDs()) != 1 {
+		t.Errorf("the original changed with its clone: %v, %d items", got, len(c.IDs()))
+	}
+	rekey, err := NewRekey([]byte("new"), testKDF, Argon2id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.ChangeKey(rekey); err != nil {
+		t.Fatal(err)
+	}
+	if secret, err := c.Secret(id); err != nil || string(secret) != "one" {
+		t.Errorf("the original reads %q, %v after its clone changed key", secret, err)
+	}
+	c.Discard(next)
+	if secret, err := c.Secret(id); err != nil || string(secret) != "one" {
+		t.Errorf("the original reads %q, %v after the clone was discarded", secret, err)
+	}
+	next = c.Clone()
+	rekey, err = NewRekey([]byte("new"), testKDF, Argon2id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.ChangeKey(rekey); err != nil {
+		t.Fatal(err)
+	}
+	c.Commit(next)
+	if c.key.page != nil {
+		t.Error("committing a new key left the old one alive")
+	}
+	if secret, err := next.Secret(id); err != nil || string(secret) != "one" {
+		t.Errorf("the committed clone reads %q, %v", secret, err)
+	}
+}

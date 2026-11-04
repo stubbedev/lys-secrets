@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -109,21 +108,20 @@ type Service struct {
 
 	// loginMu keeps two logins from creating the login collection at once.
 	loginMu sync.Mutex
-	// aliasWrites orders writes of the alias table: the newest sealed wins.
-	aliasWrites sequenced
+	// aliasWriter is held across a change of the alias table, its write and its
+	// commit, so the table a reader sees is always the one on disk.
+	aliasWriter sync.Mutex
 
 	mu    sync.Mutex
 	colls map[string]*collection
 	// reserved are ids of collections being written for the first time.
 	reserved map[string]struct{}
-	// aliasSeals counts the alias table's states, as sequenced numbers them.
-	aliasSeals uint64
-	aliases    map[string]string
-	aliasOff   map[string]func()
-	sessions   map[dbus.ObjectPath]*session
-	prompts    map[dbus.ObjectPath]func()
-	nextID     uint64
-	closed     bool
+	aliases  map[string]string
+	aliasOff map[string]func()
+	sessions map[dbus.ObjectPath]*session
+	prompts  map[dbus.ObjectPath]func()
+	nextID   uint64
+	closed   bool
 	// stops undo, in reverse, what Start set up beyond the collections,
 	// aliases, vault, sessions and prompts: the root object, the
 	// missing-collection subtrees, the owner watch and the bus name.
@@ -135,41 +133,15 @@ type Service struct {
 	idle *time.Timer
 }
 
-// sequenced orders writes of one file made outside the service's lock. Each
-// state is numbered under that lock as it is sealed. A write that finds a later
-// state on disk has nothing to do, since that state holds its change too.
-type sequenced struct {
-	mu      sync.Mutex
-	written uint64
-}
-
-// write runs save for state seq unless a later state is durable already.
-func (w *sequenced) write(seq uint64, save func() error) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if seq <= w.written {
-		return nil
-	}
-	if err := save(); err != nil {
-		return err
-	}
-	w.written = seq
-	return nil
-}
-
-// noMoreWrites is a state past every other: the file is gone and stays gone.
-const noMoreWrites = math.MaxUint64
-
 type collection struct {
 	id string
-	// unlocking keeps two unlocks from each paying for the KDF.
-	unlocking sync.Mutex
-	writes    sequenced
-	// seals counts the states sealed, under the service's lock.
-	seals uint64
-	kr    *keyring.Collection
-	off   func()
-	items map[uint32]func()
+	// writer is held across whatever changes the collection's file, from the
+	// change through its write to its commit: writes are in order, two unlocks do
+	// not each pay for the KDF, and a delete waits for a change in flight.
+	writer sync.Mutex
+	kr     *keyring.Collection
+	off    func()
+	items  map[uint32]func()
 	// lastUse is when a secret was last read or anything changed, in wall
 	// clock time, kept only under Config.LockAfter.
 	lastUse time.Time
@@ -377,8 +349,8 @@ func (s *Service) UnlockLogin(password []byte) error {
 // file is written; a second unlock of c waits for the first and pays nothing if
 // that one worked.
 func (s *Service) unlock(c *collection, password []byte) error {
-	c.unlocking.Lock()
-	defer c.unlocking.Unlock()
+	c.writer.Lock()
+	defer c.writer.Unlock()
 	s.mu.Lock()
 	if s.colls[c.id] != c {
 		s.mu.Unlock()
@@ -412,16 +384,16 @@ func (s *Service) finishUnlock(c *collection, password []byte, opening *keyring.
 		s.mu.Unlock()
 		return err
 	}
-	var rewrite pendingSave
+	var rewrite []byte
 	if legacy {
-		if rewrite, err = s.sealLocked(c); err != nil {
+		if rewrite, err = c.kr.Marshal(); err != nil {
 			log.Printf("secrets: rewrite collection %s in the current format: %v", c.id, err)
 		}
 	}
 	s.usedLocked(c)
 	s.mu.Unlock()
-	if rewrite.c != nil {
-		if err := rewrite.write(); err != nil {
+	if rewrite != nil {
+		if err := s.saveCollection(c.id, rewrite); err != nil {
 			log.Printf("secrets: rewrite collection %s in the current format: %v", c.id, err)
 		}
 	}
@@ -564,57 +536,69 @@ func (s *Service) emitLocked(path dbus.ObjectPath, name string, args ...any) {
 	s.signals.post(path, name, args...)
 }
 
-// pendingSave is a collection's state sealed under the lock, to be written and
-// made durable outside it.
-type pendingSave struct {
-	s    *Service
-	c    *collection
-	seq  uint64
-	data []byte
-}
-
-func (s *Service) sealLocked(c *collection) (pendingSave, error) {
-	data, err := c.kr.Marshal()
-	if err != nil {
-		return pendingSave{}, err
+func (s *Service) saveCollection(id string, data []byte) error {
+	if err := s.disk.save(id, data); err != nil {
+		return fmt.Errorf("save collection %s: %w", id, err)
 	}
-	c.seals++
-	s.usedLocked(c)
-	return pendingSave{s: s, c: c, seq: c.seals, data: data}, nil
+	return nil
 }
 
-func (p pendingSave) write() error {
-	return p.c.writes.write(p.seq, func() error {
-		if err := p.s.disk.save(p.c.id, p.data); err != nil {
-			return fmt.Errorf("save collection %s: %w", p.c.id, err)
-		}
-		return nil
-	})
-}
+// errGone is a change to a collection deleted or closed before it could apply.
+var errGone = errors.New("the collection is gone")
 
-// change applies a change to c under the lock, seals it, makes it durable with
-// the lock free so a slow disk holds nobody else up, and announces it under the
-// lock once it is on disk. It returns only then, so a reply built on its result
-// promises what it always promised.
-func (s *Service) change(c *collection, apply, announce func() error) error {
+// change applies a change to a copy of c under the lock and makes that durable
+// with the lock free, so a slow disk holds nobody else up, while every reader goes
+// on seeing c as it is on disk. Only then does the copy become c and is the change
+// announced, so nobody reads a change a crash could still undo, and a reply built on
+// the result promises what it always promised. A collection locked during the
+// write is left locked, as it is now on disk.
+func (s *Service) change(c *collection, apply func(kr *keyring.Collection) error, announce func() error) error {
+	c.writer.Lock()
+	defer c.writer.Unlock()
 	s.mu.Lock()
-	if err := apply(); err != nil {
+	if s.closed || s.colls[c.id] != c {
 		s.mu.Unlock()
+		return fmt.Errorf("change collection %s: %w", c.id, errGone)
+	}
+	if c.kr.Locked() {
+		s.mu.Unlock()
+		return keyring.ErrLocked
+	}
+	base := c.kr
+	next := base.Clone()
+	if err := apply(next); err != nil {
+		s.mu.Unlock()
+		base.Discard(next)
 		return err
 	}
-	save, err := s.sealLocked(c)
+	data, err := next.Marshal()
 	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if err := save.write(); err != nil {
-		return err
+	if err == nil {
+		err = s.saveCollection(c.id, data)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.colls[c.id] != c {
+	if err != nil {
+		base.Discard(next)
+		return err
+	}
+	if s.closed {
+		base.Discard(next)
 		return nil
 	}
+	if base.Locked() {
+		base.Discard(next)
+		next.Destroy()
+		locked, perr := keyring.Parse(data)
+		if perr != nil {
+			return fmt.Errorf("collection %s, locked while its change was written: %w", c.id, perr)
+		}
+		c.kr = locked
+	} else {
+		base.Commit(next)
+		c.kr = next
+	}
+	s.usedLocked(c)
 	return announce()
 }
 
@@ -636,10 +620,10 @@ func (s *Service) addCollection(pick func(taken func(string) bool) string, kr *k
 	}
 	s.reserved[id] = struct{}{}
 	c := &collection{id: id, kr: kr, items: map[uint32]func(){}}
-	save, err := s.sealLocked(c)
+	data, err := kr.Marshal()
 	s.mu.Unlock()
 	if err == nil {
-		err = save.write()
+		err = s.saveCollection(id, data)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -677,7 +661,7 @@ func (s *Service) collectionIface(c *collection) dbusx.Interface {
 			if !ok {
 				return dbusx.InvalidArgs("Label is a string")
 			}
-			err := s.change(c, func() error { return c.kr.SetLabel(label, s.now()) }, func() error {
+			err := s.change(c, func(kr *keyring.Collection) error { return kr.SetLabel(label, s.now()) }, func() error {
 				s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 				return nil
 			})
@@ -722,28 +706,30 @@ func (s *Service) exportAliasLocked(alias string) error {
 
 // setAlias points alias at id, or removes it with "".
 func (s *Service) setAlias(alias, id string) error {
-	return s.changeAliases([]string{alias}, func() {
+	return s.changeAliases([]string{alias}, func(aliases map[string]string) {
 		if id == "" {
-			delete(s.aliases, alias)
+			delete(aliases, alias)
 		} else {
-			s.aliases[alias] = id
+			aliases[alias] = id
 		}
 	})
 }
 
-// changeAliases applies a change to the alias table under the lock, makes it
-// durable with the lock free, then exports the aliases it names.
-func (s *Service) changeAliases(aliases []string, apply func()) error {
+// changeAliases applies a change to a copy of the alias table, makes that durable
+// with the lock free, then makes it the table and exports the aliases it names:
+// nobody reads an alias a crash could still undo.
+func (s *Service) changeAliases(names []string, apply func(aliases map[string]string)) error {
+	s.aliasWriter.Lock()
+	defer s.aliasWriter.Unlock()
 	s.mu.Lock()
-	apply()
-	data, err := encodeAliases(s.aliases)
-	s.aliasSeals++
-	seq := s.aliasSeals
+	next := maps.Clone(s.aliases)
 	s.mu.Unlock()
+	apply(next)
+	data, err := encodeAliases(next)
 	if err != nil {
 		return err
 	}
-	if err := s.aliasWrites.write(seq, func() error { return s.disk.saveAliases(data) }); err != nil {
+	if err := s.disk.saveAliases(data); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -751,8 +737,9 @@ func (s *Service) changeAliases(aliases []string, apply func()) error {
 	if s.closed {
 		return nil
 	}
+	s.aliases = next
 	var errs []error
-	for _, alias := range aliases {
+	for _, alias := range names {
 		errs = append(errs, s.exportAliasLocked(alias))
 	}
 	return errors.Join(errs...)
@@ -780,19 +767,19 @@ func (s *Service) exportItemLocked(c *collection, id uint32) error {
 			"Modified": item(func(it keyring.Item) any { return unixSeconds(it.Modified) }),
 		},
 		Setters: dbusx.Setters{
-			"Label": s.itemSetter(c, id, func(v dbus.Variant) (func() error, *dbus.Error) {
+			"Label": s.itemSetter(c, id, func(v dbus.Variant) (func(*keyring.Collection) error, *dbus.Error) {
 				label, ok := v.Value().(string)
 				if !ok {
 					return nil, dbusx.InvalidArgs("Label is a string")
 				}
-				return func() error { return c.kr.SetItemLabel(id, label, s.now()) }, nil
+				return func(kr *keyring.Collection) error { return kr.SetItemLabel(id, label, s.now()) }, nil
 			}),
-			"Attributes": s.itemSetter(c, id, func(v dbus.Variant) (func() error, *dbus.Error) {
+			"Attributes": s.itemSetter(c, id, func(v dbus.Variant) (func(*keyring.Collection) error, *dbus.Error) {
 				attrs, ok := v.Value().(map[string]string)
 				if !ok {
 					return nil, dbusx.InvalidArgs("Attributes is a{ss}")
 				}
-				return func() error { return c.kr.SetItemAttributes(id, attrs, s.now()) }, nil
+				return func(kr *keyring.Collection) error { return kr.SetItemAttributes(id, attrs, s.now()) }, nil
 			}),
 		},
 	})
@@ -803,7 +790,7 @@ func (s *Service) exportItemLocked(c *collection, id uint32) error {
 	return nil
 }
 
-func (s *Service) itemSetter(c *collection, id uint32, decode func(dbus.Variant) (func() error, *dbus.Error)) func(dbus.Variant) *dbus.Error {
+func (s *Service) itemSetter(c *collection, id uint32, decode func(dbus.Variant) (func(*keyring.Collection) error, *dbus.Error)) func(dbus.Variant) *dbus.Error {
 	return func(v dbus.Variant) *dbus.Error {
 		apply, derr := decode(v)
 		if derr != nil {
