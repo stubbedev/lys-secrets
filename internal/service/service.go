@@ -104,6 +104,8 @@ type Service struct {
 	conn *dbus.Conn
 	cfg  Config
 	disk disk
+	// signals sends what the service emits, off its lock.
+	signals *signalQueue
 
 	// loginMu keeps two logins from creating the login collection at once.
 	loginMu sync.Mutex
@@ -203,6 +205,7 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 		conn: conn, cfg: cfg, disk: disk{dir: cfg.Dir, write: atomicfile.WriteFile},
 		colls: map[string]*collection{}, reserved: map[string]struct{}{}, aliasOff: map[string]func(){},
 		sessions: map[dbus.ObjectPath]*session{}, prompts: map[dbus.ObjectPath]func(){},
+		signals: newSignalQueue(conn.Emit),
 	}
 	var err error
 	if s.aliases, err = s.disk.loadAliases(); err != nil {
@@ -311,10 +314,12 @@ func (s *Service) withdrawLocked() {
 // so nothing is sealed on the way out.
 func (s *Service) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
+	defer s.signals.drain(time.After(signalDrainWait))
+	defer s.mu.Unlock()
 	s.closed = true
 	if s.idle != nil {
 		s.idle.Stop()
@@ -554,10 +559,9 @@ func (s *Service) locked(fn func() any) func() any {
 	}
 }
 
+// emitLocked queues a signal, in order with every other, for after the lock.
 func (s *Service) emitLocked(path dbus.ObjectPath, name string, args ...any) {
-	if err := s.conn.Emit(path, name, args...); err != nil {
-		log.Printf("secrets: emit %s: %v", name, err)
-	}
+	s.signals.post(path, name, args...)
 }
 
 // pendingSave is a collection's state sealed under the lock, to be written and

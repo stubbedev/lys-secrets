@@ -50,8 +50,16 @@ underscores. That id is the object path and the file name.
 If `lys-secrets` is not running, lys-login unlocks a running gnome-keyring instead.
 
 The service's lock is free while a password's key is derived and while a file is
-written, so a slow Argon2id or `fsync` holds up nobody else's search or read. A
-reply to a change still comes only once the change is durable.
+written, so a slow Argon2id or `fsync` holds up nobody else's search or read, and
+signals go out on their own goroutine, in order, so a stalled bus holds up nothing
+either.
+
+A reply to a change, and the signal that announces it, come only once the change
+is durable. Another client reading while that write is in progress sees the change
+already, and a crash in that moment loses it, even though that client read it: until
+the writer has its reply, a read says what the service holds, not what is on disk.
+The same goes for a delete, which a crash can undo. A client that needs a change to
+survive waits for its reply or its signal.
 
 Changing your login password does not re-encrypt the collection, so your new
 password does not open it. Ask for a new collection password with `ChangeLock`,

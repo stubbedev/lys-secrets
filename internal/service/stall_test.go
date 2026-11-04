@@ -3,7 +3,9 @@ package service
 import (
 	"os"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -371,4 +373,98 @@ func TestADeletedCollectionStaysDeletedPastASaveInFlight(t *testing.T) {
 	if _, err := os.Stat(f.svc.disk.path(LoginID)); !os.IsNotExist(err) {
 		t.Errorf("the file of a deleted collection: %v", err)
 	}
+}
+
+func TestABlockedBusHoldsNoRead(t *testing.T) {
+	f := newStallFixture(t)
+	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.mu.Lock()
+	c := f.svc.colls[LoginID]
+	f.svc.mu.Unlock()
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	var mu sync.Mutex
+	var sent []string
+	queue := newSignalQueue(func(_ dbus.ObjectPath, name string, _ ...any) error {
+		mu.Lock()
+		sent = append(sent, name)
+		mu.Unlock()
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+	f.svc.mu.Lock()
+	f.svc.signals = queue
+	f.svc.mu.Unlock()
+	for i, name := range []string{"first", "second", "third"} {
+		err := f.svc.change(c, func() error {
+			return c.kr.SetLabel(name, f.svc.now())
+		}, func() error {
+			f.svc.emitLocked(rootPath, name, i)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	finishedSearch := make(chan struct{})
+	go func() {
+		f.search(t)
+		close(finishedSearch)
+	}()
+	finished(t, "the read during a blocked Emit", finishedSearch)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the signal was never sent")
+	}
+	close(release)
+	queue.drain(time.After(5 * time.Second))
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(sent, []string{"first", "second", "third"}) {
+		t.Errorf("signals sent as %v, want them in order", sent)
+	}
+}
+
+func TestSignalsPastTheBoundAreDroppedAndTheQueueIsBounded(t *testing.T) {
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	queue := newSignalQueue(func(dbus.ObjectPath, string, ...any) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+	queue.post(rootPath, "first")
+	<-entered
+	for range 4 * maxPendingSignals {
+		queue.post(rootPath, "flood")
+	}
+	queue.mu.Lock()
+	pending, dropped := len(queue.pending), queue.dropped
+	queue.mu.Unlock()
+	if pending != maxPendingSignals || dropped == 0 {
+		t.Errorf("%d signals queued and %d dropped, want the bound of %d and the rest dropped", pending, dropped, maxPendingSignals)
+	}
+	close(release)
+	queue.drain(time.After(5 * time.Second))
+}
+
+func TestAClosingServiceDoesNotWaitOnABlockedBus(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	queue := newSignalQueue(func(dbus.ObjectPath, string, ...any) error {
+		<-release
+		return nil
+	})
+	queue.post(rootPath, "stuck")
+	timeout := make(chan time.Time)
+	close(timeout)
+	queue.drain(timeout)
 }

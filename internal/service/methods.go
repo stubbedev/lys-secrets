@@ -673,9 +673,7 @@ func (m promptMethods) Dismiss() *dbus.Error {
 }
 
 func (p *prompt) complete(dismissed bool, result dbus.Variant) {
-	if err := p.s.conn.Emit(p.path, ifacePrompt+".Completed", dismissed, result); err != nil {
-		log.Printf("secrets: emit Completed: %v", err)
-	}
+	p.s.signals.post(p.path, ifacePrompt+".Completed", dismissed, result)
 	p.s.mu.Lock()
 	delete(p.s.prompts, p.path)
 	p.s.mu.Unlock()
