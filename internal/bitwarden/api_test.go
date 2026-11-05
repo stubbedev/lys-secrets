@@ -357,3 +357,47 @@ func TestRevokeTellsAnUnsupportedServerFromAFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestEveryRequestNamesTheClientVersion(t *testing.T) {
+	identified := func(ok string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Bitwarden-Client-Version") == "" {
+				reply(400, `{"message":"No client version header found"}`)(w, r)
+				return
+			}
+			reply(200, ok)(w, r)
+		}
+	}
+	f := newFakeServer(t, map[string]http.HandlerFunc{
+		"/identity/accounts/prelogin/password": identified(`{"kdf":0,"kdfIterations":600000}`),
+		"/identity/connect/token":              identified(`{"access_token":"at","expires_in":60}`),
+		"/identity/connect/revocation":         identified(``),
+		"/api/sync":                            identified(`{"profile":{"email":"a@b.c"}}`),
+	})
+	c := testClient(f)
+	if _, err := c.Prelogin(t.Context(), "a@b.c"); err != nil {
+		t.Errorf("prelogin = %v", err)
+	}
+	if _, err := c.PasswordLogin(t.Context(), "a@b.c", "h", nil, "", testNow); err != nil {
+		t.Errorf("login = %v", err)
+	}
+	if err := c.Revoke(t.Context(), "rt", clientID); err != nil {
+		t.Errorf("revoke = %v", err)
+	}
+	if _, err := c.Sync(t.Context(), "at"); err != nil {
+		t.Errorf("sync = %v", err)
+	}
+	if len(f.headers) != 4 {
+		t.Fatalf("the server saw %d requests, want 4", len(f.headers))
+	}
+	for i, h := range f.headers {
+		if h.Get("Bitwarden-Client-Version") != clientVersion || h.Get("Device-Type") != "8" || h.Get("Bitwarden-Client-Name") != "desktop" {
+			t.Errorf("request %d identified itself as %q %q %q", i, h.Get("Bitwarden-Client-Version"), h.Get("Device-Type"), h.Get("Bitwarden-Client-Name"))
+		}
+	}
+	refusing := newFakeServer(t, map[string]http.HandlerFunc{"/api/sync": reply(400, `{"message":"No client version header found"}`)})
+	var ae *APIError
+	if _, err := testClient(refusing).Sync(t.Context(), "at"); !errors.As(err, &ae) || ae.Status != 400 || ae.Message != "No client version header found" || ae.Retryable() {
+		t.Errorf("a refused sync = %v, want the server's non-retryable answer", err)
+	}
+}

@@ -44,10 +44,12 @@ type Device struct {
 	ID, Name string
 }
 
-// The client identity: the desktop client id and Bitwarden's
-// LinuxDesktop device type, the category this client is.
+// The client identity: the desktop client id and version, which
+// bitwarden.com refuses a request without, and Bitwarden's LinuxDesktop
+// device type, the category this client is.
 const (
 	clientID          = "desktop"
+	clientVersion     = "2025.10.0"
 	deviceTypeLinux   = "8"
 	httpTimeout       = 30 * time.Second
 	maxRedirects      = 10
@@ -59,6 +61,7 @@ const (
 	jsonContentType   = "application/json"
 	headerDeviceType  = "Device-Type"
 	headerClientName  = "Bitwarden-Client-Name"
+	headerClientVer   = "Bitwarden-Client-Version"
 	headerAuthEmail   = "Auth-Email"
 	headerContentType = "Content-Type"
 	headerAccept      = "Accept"
@@ -243,8 +246,6 @@ func (c *Client) Revoke(ctx context.Context, refreshToken, loginClientID string)
 	}
 	req.Header.Set(headerContentType, formContentType)
 	req.Header.Set(headerAccept, jsonContentType)
-	req.Header.Set(headerDeviceType, deviceTypeLinux)
-	req.Header.Set(headerClientName, clientID)
 	status, raw, err := c.do(req, "revoke the session")
 	if err != nil {
 		return err
@@ -293,8 +294,6 @@ func (c *Client) token(ctx context.Context, op string, form url.Values, authEmai
 	}
 	req.Header.Set(headerContentType, formContentType)
 	req.Header.Set(headerAccept, jsonContentType)
-	req.Header.Set(headerDeviceType, deviceTypeLinux)
-	req.Header.Set(headerClientName, clientID)
 	if authEmail != "" {
 		req.Header.Set(headerAuthEmail, authEmail)
 	}
@@ -427,8 +426,6 @@ func (c *Client) api(ctx context.Context, op, method, path, accessToken string, 
 	}
 	req.Header.Set(headerAuth, "Bearer "+accessToken)
 	req.Header.Set(headerAccept, jsonContentType)
-	req.Header.Set(headerDeviceType, deviceTypeLinux)
-	req.Header.Set(headerClientName, clientID)
 	status, raw, err := c.do(req, op)
 	if err != nil {
 		return err
@@ -454,8 +451,6 @@ func (c *Client) postJSON(ctx context.Context, op, endpoint string, body []byte,
 	}
 	req.Header.Set(headerContentType, jsonContentType)
 	req.Header.Set(headerAccept, jsonContentType)
-	req.Header.Set(headerDeviceType, deviceTypeLinux)
-	req.Header.Set(headerClientName, clientID)
 	status, raw, err := c.do(req, op)
 	if err != nil {
 		return 0, err
@@ -473,6 +468,9 @@ func (c *Client) postJSON(ctx context.Context, op, endpoint string, body []byte,
 }
 
 func (c *Client) do(req *http.Request, op string) (int, []byte, error) {
+	req.Header.Set(headerDeviceType, deviceTypeLinux)
+	req.Header.Set(headerClientName, clientID)
+	req.Header.Set(headerClientVer, clientVersion)
 	resp, err := c.http.Do(req)
 	if errors.Is(err, vault.ErrInsecureServer) {
 		return 0, nil, fmt.Errorf("bitwarden: %s: the server redirected: %w", op, err)
