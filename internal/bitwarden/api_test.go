@@ -88,6 +88,27 @@ func TestPrelogin(t *testing.T) {
 	}
 }
 
+// bitwarden.com answers the password endpoint in the original shape: its
+// top-level KDF fields are the account's, not a zero KDF.
+func TestAPasswordPreloginInTheOriginalShapeIsRead(t *testing.T) {
+	f := newFakeServer(t, map[string]http.HandlerFunc{
+		"/identity/accounts/prelogin/password": reply(200, `{"kdf":0,"kdfIterations":600000,"kdfMemory":null,"kdfParallelism":null}`),
+	})
+	p, err := testClient(f).Prelogin(context.Background(), "a@b.c")
+	if err != nil || p.Kdf != (Kdf{Type: KdfPBKDF2, Iterations: 600000}) || p.Salt != "a@b.c" {
+		t.Errorf("prelogin = %+v, %v; want PBKDF2 600000 salted by the email", p, err)
+	}
+}
+
+func TestAPreloginNamingNoKeyDerivationFails(t *testing.T) {
+	f := newFakeServer(t, map[string]http.HandlerFunc{
+		"/identity/accounts/prelogin/password": reply(200, `{"salt":"s"}`),
+	})
+	if p, err := testClient(f).Prelogin(context.Background(), "a@b.c"); err == nil {
+		t.Errorf("prelogin = %+v, want an error rather than a zero KDF", p)
+	}
+}
+
 // A password login posts the hash, the device and the base64url email
 // header, and reads the tokens and wrapped keys.
 func TestPasswordLogin(t *testing.T) {

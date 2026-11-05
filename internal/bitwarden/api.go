@@ -110,45 +110,59 @@ type Prelogin struct {
 	Salt string
 }
 
-// Prelogin asks how the account derives its master key. Older servers
-// (Vaultwarden among them) answer only the original endpoint, without a
-// salt: then the salt is the email.
+// Prelogin asks how the account derives its master key. The password
+// endpoint answers either the current shape, KDF settings and a salt, or,
+// as bitwarden.com does, the original one; older servers (Vaultwarden
+// among them) answer only the original endpoint. Without a salt it is the
+// email.
 func (c *Client) Prelogin(ctx context.Context, email string) (Prelogin, error) {
 	body, err := json.Marshal(map[string]string{"email": email})
 	if err != nil {
 		return Prelogin{}, fmt.Errorf("bitwarden: prelogin request: %w", err)
 	}
-	var current struct {
-		KdfSettings struct {
-			KdfType     KdfType
-			Iterations  int
-			Memory      *int
-			Parallelism *int
-		}
-		Salt string
+	var answer preloginAnswer
+	status, err := c.postJSON(ctx, "prelogin", c.server.Identity+"/accounts/prelogin/password", body, &answer)
+	if status == http.StatusNotFound {
+		answer = preloginAnswer{}
+		_, err = c.postJSON(ctx, "prelogin", c.server.Identity+"/accounts/prelogin", body, &answer)
 	}
-	status, err := c.postJSON(ctx, "prelogin", c.server.Identity+"/accounts/prelogin/password", body, &current)
-	if err == nil {
-		k := current.KdfSettings
-		p := Prelogin{Kdf: Kdf{Type: k.KdfType, Iterations: k.Iterations, Memory: deref(k.Memory), Parallelism: deref(k.Parallelism)}, Salt: current.Salt}
-		if p.Salt == "" {
-			p.Salt = email
-		}
-		return p, nil
-	}
-	if status != http.StatusNotFound {
+	if err != nil {
 		return Prelogin{}, err
 	}
-	var legacy struct {
-		Kdf            KdfType
-		KdfIterations  int
-		KdfMemory      *int
-		KdfParallelism *int
+	return answer.prelogin(email)
+}
+
+// preloginAnswer is either prelogin shape: KdfSettings and Salt from the
+// current one, the top-level fields from the original.
+type preloginAnswer struct {
+	KdfSettings *struct {
+		KdfType     KdfType
+		Iterations  int
+		Memory      *int
+		Parallelism *int
 	}
-	if _, err := c.postJSON(ctx, "prelogin", c.server.Identity+"/accounts/prelogin", body, &legacy); err != nil {
-		return Prelogin{}, err
+	Salt           string
+	Kdf            *KdfType
+	KdfIterations  int
+	KdfMemory      *int
+	KdfParallelism *int
+}
+
+func (a preloginAnswer) prelogin(email string) (Prelogin, error) {
+	p := Prelogin{Salt: a.Salt}
+	if p.Salt == "" {
+		p.Salt = email
 	}
-	return Prelogin{Kdf: Kdf{Type: legacy.Kdf, Iterations: legacy.KdfIterations, Memory: deref(legacy.KdfMemory), Parallelism: deref(legacy.KdfParallelism)}, Salt: email}, nil
+	switch {
+	case a.KdfSettings != nil:
+		k := a.KdfSettings
+		p.Kdf = Kdf{Type: k.KdfType, Iterations: k.Iterations, Memory: deref(k.Memory), Parallelism: deref(k.Parallelism)}
+	case a.Kdf != nil:
+		p.Kdf = Kdf{Type: *a.Kdf, Iterations: a.KdfIterations, Memory: deref(a.KdfMemory), Parallelism: deref(a.KdfParallelism)}
+	default:
+		return Prelogin{}, errors.New("bitwarden: prelogin: the answer names no key derivation")
+	}
+	return p, nil
 }
 
 func deref(p *int) int {
