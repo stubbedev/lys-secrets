@@ -11,6 +11,8 @@ import (
 	"fmt"
 
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 const (
@@ -39,13 +41,14 @@ type Client struct {
 	conn    *dbus.Conn
 	svc     dbus.BusObject
 	session dbus.ObjectPath
+	tr      transport.Transport
 }
 
 // Open starts a session; without a provider on the bus it fails.
 func Open(ctx context.Context, conn *dbus.Conn) (*Client, error) {
-	c := &Client{conn: conn, svc: conn.Object(busName, servicePath)}
+	c := &Client{conn: conn, svc: conn.Object(busName, servicePath), tr: transport.Plain{}}
 	var out dbus.Variant
-	if err := c.svc.CallWithContext(ctx, ifaceService+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&out, &c.session); err != nil {
+	if err := c.svc.CallWithContext(ctx, ifaceService+".OpenSession", 0, transport.AlgPlain, dbus.MakeVariant("")).Store(&out, &c.session); err != nil {
 		return nil, fmt.Errorf("secrets: open a session with %s: %w", busName, err)
 	}
 	return c, nil
@@ -101,7 +104,11 @@ func (c *Client) lookup(ctx context.Context, attrs map[string]string, unlock boo
 	if !ok {
 		return nil, false, fmt.Errorf("secrets: %s stayed locked", item)
 	}
-	return s.Value, true, nil
+	value, err = c.tr.Decode(s.Parameters, s.Value)
+	if err != nil {
+		return nil, false, fmt.Errorf("secrets: decrypt %s: %w", item, err)
+	}
+	return value, true, nil
 }
 
 // Store saves value under attrs in the default collection, replacing an
@@ -148,7 +155,11 @@ func (c *Client) storeIn(ctx context.Context, coll dbus.ObjectPath, label string
 		"org.freedesktop.Secret.Item.Attributes": dbus.MakeVariant(attrs),
 	}
 	var item, prompt dbus.ObjectPath
-	s := secret{Session: c.session, Parameters: []byte{}, Value: value, ContentType: "application/octet-stream"}
+	params, enc, err := c.tr.Encode(value)
+	if err != nil {
+		return fmt.Errorf("secrets: encrypt for %s: %w", coll, err)
+	}
+	s := secret{Session: c.session, Parameters: params, Value: enc, ContentType: "application/octet-stream"}
 	if err := c.conn.Object(busName, coll).CallWithContext(ctx, ifaceCollection+".CreateItem", 0, props, s, true).Store(&item, &prompt); err != nil {
 		return fmt.Errorf("secrets: store in %s: %w", coll, err)
 	}

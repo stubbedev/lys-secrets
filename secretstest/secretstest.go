@@ -21,6 +21,7 @@ import (
 type Server struct {
 	svc     *service.Service
 	prompts *prompts
+	dir     string
 }
 
 // Start serves the Secret Service on conn with its login collection
@@ -29,8 +30,9 @@ type Server struct {
 func Start(t testing.TB, conn *dbus.Conn, password string) *Server {
 	t.Helper()
 	p := &prompts{}
+	dir := t.TempDir()
 	svc, err := service.Start(conn, service.Config{
-		Dir: t.TempDir(), KDF: keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}, Stretch: keyring.Argon2id, Prompter: p,
+		Dir: dir, KDF: keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}, Stretch: keyring.Argon2id, Prompter: p,
 	})
 	if err != nil {
 		t.Fatalf("secretstest: start the Secret Service: %v", err)
@@ -39,7 +41,17 @@ func Start(t testing.TB, conn *dbus.Conn, password string) *Server {
 	if err := svc.UnlockLogin([]byte(password)); err != nil {
 		t.Fatalf("secretstest: unlock the login collection: %v", err)
 	}
-	return &Server{svc: svc, prompts: p}
+	return &Server{svc: svc, prompts: p, dir: dir}
+}
+
+// Dir is the directory the collections' files are in.
+func (s *Server) Dir() string { return s.dir }
+
+// Asked is how many password prompts the service showed.
+func (s *Server) Asked() int {
+	s.prompts.mu.Lock()
+	defer s.prompts.mu.Unlock()
+	return s.prompts.asked
 }
 
 // Lock locks every collection, as the user locking the session does.
@@ -57,11 +69,13 @@ func (s *Server) Answer(answers ...string) {
 type prompts struct {
 	mu      sync.Mutex
 	answers []string
+	asked   int
 }
 
 func (p *prompts) next() ([]byte, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.asked++
 	if len(p.answers) == 0 {
 		return nil, false, nil
 	}
