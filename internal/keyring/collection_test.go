@@ -167,8 +167,8 @@ func TestLockThatCannotSealStillDestroysTheKey(t *testing.T) {
 	if err := c.Lock(); err == nil {
 		t.Fatal("Lock sealed a secret that does not open")
 	}
-	if !c.Locked() || k.page != nil {
-		t.Errorf("locked %v, key page %v: the key outlived a failed Lock", c.Locked(), k.page)
+	if !c.Locked() || !k.mem.Destroyed() {
+		t.Errorf("locked %v, key destroyed %v: the key outlived a failed Lock", c.Locked(), k.mem.Destroyed())
 	}
 	if err := c.Unlock([]byte("pw")); err == nil || errors.Is(err, ErrWrongPassword) {
 		t.Errorf("Unlock after a failed Lock = %v, want an error about the missing body", err)
@@ -185,8 +185,8 @@ func TestDestroyDropsTheKeyWithoutSealing(t *testing.T) {
 	corruptSealedSecret(t, c, id)
 
 	c.Destroy()
-	if !c.Locked() || k.page != nil || c.Label() != "" {
-		t.Errorf("locked %v, key page %v, label %q after Destroy", c.Locked(), k.page, c.Label())
+	if !c.Locked() || !k.mem.Destroyed() || c.Label() != "" {
+		t.Errorf("locked %v, key destroyed %v, label %q after Destroy", c.Locked(), k.mem.Destroyed(), c.Label())
 	}
 	if it, _ := c.Item(id); it.Label != "" || it.Attributes != nil {
 		t.Errorf("a destroyed item shows %+v", it)
@@ -530,7 +530,7 @@ func TestACloneChangesWithoutTheOriginalAndCommitsOrDiscards(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Commit(next)
-	if c.key.page != nil {
+	if !c.key.mem.Destroyed() {
 		t.Error("committing a new key left the old one alive")
 	}
 	if secret, err := next.Secret(id); err != nil || string(secret) != "one" {

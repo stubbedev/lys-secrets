@@ -1,6 +1,7 @@
-package keyring
+package lockedmem
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,7 +23,7 @@ func TestAFailedMlockIsLoggedOnceWithItsContext(t *testing.T) {
 	if len(logged) != 1 {
 		t.Fatalf("logged %q, want one line", logged)
 	}
-	for _, want := range []string{"swap", "4096-byte", unix.ENOMEM.Error(), "RLIMIT_MEMLOCK 65536 bytes", "LimitMEMLOCK="} {
+	for _, want := range []string{"swap", "4096-byte page", unix.ENOMEM.Error(), "RLIMIT_MEMLOCK 65536 bytes", "LimitMEMLOCK="} {
 		if !strings.Contains(logged[0], want) {
 			t.Errorf("%q does not say %q", logged[0], want)
 		}
@@ -49,4 +50,39 @@ func TestASuccessfulMlockLogsNothing(t *testing.T) {
 		logf:  func(string, ...any) { t.Error("logged after a successful mlock") },
 	}
 	g.pin(make([]byte, 4096))
+}
+
+func TestABufHoldsItsBytesUntilDestroyed(t *testing.T) {
+	b, err := Copy([]byte("hunter2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b.Bytes()) != "hunter2" || len(b.Bytes()) != 7 || cap(b.Bytes()) != 7 {
+		t.Fatalf("Bytes = %q (cap %d)", b.Bytes(), cap(b.Bytes()))
+	}
+	b.Destroy()
+	if !b.Destroyed() || b.Bytes() != nil {
+		t.Error("a destroyed buffer still holds memory")
+	}
+	b.Destroy()
+	if _, err := New(0); err == nil {
+		t.Error("a zero-length buffer was mapped")
+	}
+}
+
+func TestDestroyZeroesBeforeUnmapping(t *testing.T) {
+	b, err := Copy([]byte("hunter2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []byte
+	unmap = func(page []byte) error {
+		seen = append(seen, page...)
+		return unix.Munmap(page)
+	}
+	t.Cleanup(func() { unmap = unix.Munmap })
+	b.Destroy()
+	if len(seen) == 0 || bytes.ContainsFunc(seen, func(r rune) bool { return r != 0 }) {
+		t.Errorf("the page held %q as it was unmapped", bytes.TrimRight(seen, "\x00"))
+	}
 }
