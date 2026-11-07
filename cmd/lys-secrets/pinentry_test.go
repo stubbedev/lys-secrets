@@ -99,7 +99,10 @@ func gnupg(t *testing.T) (gpg func(args ...string) (string, error), kill func())
 		return string(out), err
 	}
 	kill = func() { _, _ = run(gpgconf, "--kill", "gpg-agent") }
-	t.Cleanup(kill)
+	t.Cleanup(func() {
+		kill()
+		_, _ = run(gpgconf, "--remove-socketdir")
+	})
 	if out, err := run(gpgBin, "--batch", "--pinentry-mode", "loopback", "--passphrase", "hunter2", "--quick-gen-key", "Test <t@example.org>", "ed25519", "sign", "never"); err != nil {
 		t.Fatalf("generate a key: %v\n%s", err, out)
 	}
