@@ -159,12 +159,13 @@ func (c *Client) Watch(ctx context.Context, w Watcher) error {
 	signals := make(chan *dbus.Signal, 16)
 	c.conn.Signal(signals)
 	appeared := make(chan struct{}, 1)
-	if err := dbusx.WatchOwner(ctx, c.conn, ServiceName, func() {
+	stopOwner, err := dbusx.WatchOwner(ctx, c.conn, ServiceName, func() {
 		select {
 		case appeared <- struct{}{}:
 		default:
 		}
-	}); err != nil {
+	})
+	if err != nil {
 		c.conn.RemoveSignal(signals)
 		_ = c.conn.RemoveMatchSignal(match...)
 		return fmt.Errorf("vault: watch %s: %w", ServiceName, err)
@@ -172,6 +173,9 @@ func (c *Client) Watch(ctx context.Context, w Watcher) error {
 	owner, _ := dbusx.NameOwner(ctx, c.conn, ServiceName)
 	go func() {
 		defer func() {
+			if err := stopOwner(); err != nil {
+				log.Printf("vault: %v", err)
+			}
 			c.conn.RemoveSignal(signals)
 			_ = c.conn.RemoveMatchSignal(match...)
 		}()
