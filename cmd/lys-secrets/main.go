@@ -10,7 +10,7 @@
 // this.
 //
 //	lys-secrets [--unlock-fd N] [--collection-lock-after D] [--collection-lock-on-screen-lock]
-//	            [--confirm-foreign-reads]
+//	            [--confirm-foreign-reads] [--ssh-agent]
 //	            [--vault-lock-after D] [--vault-sync-interval D] [--vault-collection-folder NAME]
 //
 // The login collection unlocks with the password the user logs in or
@@ -21,6 +21,11 @@
 // (--unlock-fd). When another provider already owns
 // org.freedesktop.secrets, lys-secrets logs who and serves the vault
 // alone; when another lys-secrets serves the vault, it exits.
+//
+// With --ssh-agent it also serves the SSH agent protocol on
+// $XDG_RUNTIME_DIR/lys-secrets/ssh, for the keys of ~/.ssh and those added
+// with ssh-add, remembering key passphrases in the login collection, and
+// hands that socket to the session as SSH_AUTH_SOCK.
 package main
 
 import (
@@ -48,6 +53,8 @@ import (
 	"github.com/stubbedev/lys-secrets/internal/prompt"
 	"github.com/stubbedev/lys-secrets/internal/screenlock"
 	"github.com/stubbedev/lys-secrets/internal/service"
+	"github.com/stubbedev/lys-secrets/internal/sshagent"
+	"github.com/stubbedev/lys-secrets/internal/usersock"
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
@@ -62,6 +69,7 @@ type options struct {
 	collectionLockAfter time.Duration
 	lockOnScreenLock    bool
 	confirmForeignReads bool
+	sshAgent            bool
 }
 
 func main() {
@@ -70,6 +78,7 @@ func main() {
 	flag.DurationVar(&o.collectionLockAfter, "collection-lock-after", 0, "lock a collection after no secret was read from it and nothing in it changed for this long; 0 keeps it open until locked")
 	flag.BoolVar(&o.lockOnScreenLock, "collection-lock-on-screen-lock", false, "lock every collection when logind says the session locked")
 	flag.BoolVar(&o.confirmForeignReads, "confirm-foreign-reads", false, "ask before a program reads an item another program stored")
+	flag.BoolVar(&o.sshAgent, "ssh-agent", false, "serve an SSH agent on $XDG_RUNTIME_DIR/lys-secrets/ssh that keeps key passphrases in the login collection")
 	flag.DurationVar(&o.vault.LockAfter, "vault-lock-after", 15*time.Minute, "lock the Bitwarden vault after it went unused this long; 0 keeps it open until locked")
 	flag.DurationVar(&o.vault.SyncInterval, "vault-sync-interval", 30*time.Minute, "sync the open Bitwarden vault this often; 0 syncs only on unlock and when asked")
 	flag.StringVar(&o.vaultFolder, "vault-collection-folder", "", "show the logins of this Bitwarden folder as the Secret Service's \"bitwarden\" collection; empty shows none")
@@ -146,10 +155,17 @@ func run(o options) error {
 	defer release()
 	defer bw.Lock()
 
+	dialogs := prompt.New(conn)
+	var agent atomic.Pointer[sshagent.Agent]
 	svc, err := service.Start(conn, service.Config{
-		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Stretch: keyring.Argon2id, Prompter: prompt.New(conn),
+		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Stretch: keyring.Argon2id, Prompter: dialogs,
 		Vault:     vaultCollection{bw: bw, folder: o.vaultFolder},
 		LockAfter: o.collectionLockAfter, ConfirmForeignReads: o.confirmForeignReads,
+		Locked: func(id string) {
+			if a := agent.Load(); a != nil && id == service.LoginID {
+				a.Forget()
+			}
+		},
 	})
 	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string
@@ -175,6 +191,14 @@ func run(o options) error {
 		go lockOnScreenLock(ctx, svc)
 	}
 
+	if o.sshAgent {
+		stop, err := serveAgent(ctx, conn, svc, dialogs, &agent)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
+
 	ln, err := control.Listen(sock)
 	if err != nil {
 		return err
@@ -182,6 +206,72 @@ func run(o options) error {
 	log.Printf("lys-secrets: serving %s and %s, unlock socket %s", service.BusName, vault.ServiceName, sock)
 	control.Serve(ctx, ln, svc)
 	return nil
+}
+
+// serveAgent serves the SSH agent for ~/.ssh until ctx ends, keeping
+// passphrases in svc's login collection and asking through dialogs, and
+// hands its socket to the session as SSH_AUTH_SOCK; stop takes it back and
+// drops every key.
+func serveAgent(ctx context.Context, conn *dbus.Conn, svc *service.Service, dialogs *prompt.Dialogs, current *atomic.Pointer[sshagent.Agent]) (stop func(), err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("the SSH agent: find ~/.ssh: %w", err)
+	}
+	path, err := usersock.Path(xdg.OS, "ssh")
+	if err != nil {
+		return nil, fmt.Errorf("the SSH agent: %w", err)
+	}
+	ln, err := usersock.Listen(path)
+	if err != nil {
+		return nil, fmt.Errorf("the SSH agent: %w", err)
+	}
+	a := sshagent.New(filepath.Join(home, ".ssh"), dialogs, loginPassphrases{svc})
+	current.Store(a)
+	go a.Serve(ctx, ln)
+	unexport := exportEnv(conn, "SSH_AUTH_SOCK", path)
+	log.Printf("lys-secrets: serving the SSH agent on %s", path)
+	return func() {
+		unexport()
+		_ = ln.Close()
+		current.Store(nil)
+		a.Close()
+	}, nil
+}
+
+// loginPassphrases keeps the SSH agent's remembered passphrases in the
+// login collection.
+type loginPassphrases struct{ svc *service.Service }
+
+func (p loginPassphrases) Lookup(attrs map[string]string) ([]byte, bool, error) {
+	return p.svc.LoginSecret(attrs)
+}
+
+func (p loginPassphrases) Remember(label string, attrs map[string]string, passphrase []byte) error {
+	return p.svc.StoreLoginSecret(label, attrs, passphrase)
+}
+
+// exportEnv sets name to value in the environment the systemd user manager
+// and D-Bus activation start programs with, so the session finds it;
+// unexport takes it back from systemd. Neither being reachable is logged,
+// since the agent serves without it.
+func exportEnv(conn *dbus.Conn, name, value string) (unexport func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assignment := name + "=" + value
+	systemd := conn.Object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
+	if err := systemd.CallWithContext(ctx, "org.freedesktop.systemd1.Manager.SetEnvironment", 0, []string{assignment}).Err; err != nil {
+		log.Printf("lys-secrets: the systemd user manager does not have %s: %v", assignment, err)
+	}
+	if err := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.UpdateActivationEnvironment", 0, map[string]string{name: value}).Err; err != nil {
+		log.Printf("lys-secrets: D-Bus activation does not have %s: %v", assignment, err)
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := systemd.CallWithContext(ctx, "org.freedesktop.systemd1.Manager.UnsetEnvironment", 0, []string{name}).Err; err != nil {
+			log.Printf("lys-secrets: take %s back from the systemd user manager: %v", name, err)
+		}
+	}
 }
 
 // lockOnScreenLock locks svc's collections each time the session locks,

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -89,6 +90,16 @@ func (b *Buf) Bytes() []byte {
 		return nil
 	}
 	return b.page[:b.n:b.n]
+}
+
+// Holds reports whether p lies wholly inside the buffer.
+func (b *Buf) Holds(p []byte) bool {
+	if b == nil || b.page == nil || len(p) == 0 {
+		return false
+	}
+	start := uintptr(unsafe.Pointer(unsafe.SliceData(b.page))) //nolint:gosec // an address compared, never dereferenced
+	at := uintptr(unsafe.Pointer(unsafe.SliceData(p)))         //nolint:gosec // an address compared, never dereferenced
+	return at >= start && at+uintptr(len(p)) <= start+uintptr(b.n)
 }
 
 // Destroyed reports whether the buffer holds nothing any more.

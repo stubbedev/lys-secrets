@@ -21,7 +21,6 @@ import (
 	"io/fs"
 	"log"
 	"net"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -61,11 +60,7 @@ var (
 // an error when XDG_RUNTIME_DIR holds no absolute path, since there is
 // no other place the user's session agrees on.
 func SocketPath(env xdg.Env) (string, error) {
-	dir, ok := env.RuntimeDir("lys-secrets")
-	if !ok {
-		return "", errors.New("XDG_RUNTIME_DIR is not set to an absolute path")
-	}
-	return filepath.Join(dir, "control"), nil
+	return usersock.Path(env, "control")
 }
 
 // Login is the login collection as the socket serves it; a password that

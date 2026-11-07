@@ -24,6 +24,11 @@
         libsecret
         (python3.withPackages (ps: [ps.secretstorage]))
         chromium
+
+        # ssh, ssh-add and ssh-keygen drive the SSH agent's tests; gpg and
+        # gpg-agent drive the pinentry's.
+        openssh
+        gnupg
       ];
 
       env = {

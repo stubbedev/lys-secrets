@@ -22,6 +22,7 @@
             };
             services.lys-secrets = {
               enable = true;
+              sshAgent.enable = true;
               vault = {
                 lockAfter = 5;
                 collectionFolder = "Desk top";
@@ -75,6 +76,9 @@
         # unit, starts it with the graphical session, and hands it the vault
         # policy.
         hm-module = expect "lys-secrets-hm-module" (
+          home.home.sessionVariables.SSH_AUTH_SOCK
+          == "\${XDG_RUNTIME_DIR}/lys-secrets/ssh"
+          &&
           home.xdg.dataFile."dbus-1/services/org.freedesktop.secrets.service".source
           == "${pkg}/share/dbus-1/services/org.freedesktop.secrets.service"
           && home.xdg.dataFile."dbus-1/services/dev.stubbe.lys.Vault1.service".source
@@ -82,7 +86,7 @@
           && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
           == "${pkg}/lib/systemd/user/lys-secrets.service"
           && home.xdg.configFile."systemd/user/lys-secrets.service.d/vault.conf".text
-          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m --vault-collection-folder=\"Desk top\" --collection-lock-after=10m --collection-lock-on-screen-lock --confirm-foreign-reads\n"
+          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m --vault-collection-folder=\"Desk top\" --collection-lock-after=10m --collection-lock-on-screen-lock --confirm-foreign-reads --ssh-agent\n"
         );
 
         # NixOS hands the package to D-Bus and systemd and starts the unit
@@ -93,6 +97,7 @@
           && lib.elem "graphical-session.target" nixos.systemd.user.services.lys-secrets.wantedBy
           && nixos.systemd.user.services.lys-secrets.serviceConfig.ExecStart
           == ["" "${pkg}/bin/lys-secrets --vault-lock-after=15m --vault-sync-interval=30m"]
+          && !(lib.hasInfix "lys-secrets/ssh" nixos.environment.extraInit)
         );
       }
       // {

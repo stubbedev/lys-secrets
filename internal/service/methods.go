@@ -504,28 +504,11 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 	}
 	create := func() (dbus.ObjectPath, *dbus.Error) {
 		defer clear(value)
-		var id uint32
-		var created bool
-		err := s.change(c, func(kr *keyring.Collection) error {
-			var err error
-			id, created, err = kr.CreateItem(label, attrs, value, secret.ContentType, owner, replace, s.now())
-			return err
-		}, func() error {
-			path := itemPath(c.id, id)
-			if !created {
-				s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", path)
-				return nil
-			}
-			if err := s.exportItemLocked(c, id); err != nil {
-				return err
-			}
-			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemCreated", path)
-			return nil
-		})
+		path, err := s.createItem(c, label, attrs, value, secret.ContentType, owner, replace)
 		if err != nil {
 			return "", lockedErr(err)
 		}
-		return itemPath(c.id, id), nil
+		return path, nil
 	}
 	locked := c.kr.Locked()
 	s.mu.Unlock()
@@ -550,6 +533,32 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 		return "", "", derr
 	}
 	return noPrompt, prompt, nil
+}
+
+// createItem stores a secret in the unlocked c and announces the item.
+func (s *Service) createItem(c *collection, label string, attrs map[string]string, value []byte, contentType string, owner keyring.Owner, replace bool) (dbus.ObjectPath, error) {
+	var id uint32
+	var created bool
+	err := s.change(c, func(kr *keyring.Collection) error {
+		var err error
+		id, created, err = kr.CreateItem(label, attrs, value, contentType, owner, replace, s.now())
+		return err
+	}, func() error {
+		path := itemPath(c.id, id)
+		if !created {
+			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", path)
+			return nil
+		}
+		if err := s.exportItemLocked(c, id); err != nil {
+			return err
+		}
+		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemCreated", path)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return itemPath(c.id, id), nil
 }
 
 // itemMethods is org.freedesktop.Secret.Item.

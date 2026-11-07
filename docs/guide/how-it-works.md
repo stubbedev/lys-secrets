@@ -112,6 +112,30 @@ The vault also locks after [its idle time](/guide/configuration#command-line-fla
 which restarts when a field is read through `Field` or a password through the
 `bitwarden` collection. Listing items and `NetworkLogin` do not restart it.
 
+## The SSH agent
+
+With `--ssh-agent` (`services.lys-secrets.sshAgent.enable`), lys-secrets also serves
+the SSH agent protocol on `$XDG_RUNTIME_DIR/lys-secrets/ssh`, in place of `ssh-agent`
+or gnome-keyring's. It sets `SSH_AUTH_SOCK` to that path in the systemd user
+manager's and D-Bus activation's environment, and takes it back from systemd when it
+stops; the Nix modules also export it for login shells.
+
+- **Keys** are the files `~/.ssh/id_*` with a `.pub` beside them, listed from the
+  `.pub` without opening the key, plus any added with `ssh-add`. Those live in memory
+  only, as with OpenSSH's agent, and keep `ssh-add`'s `-t` lifetime and `-c`
+  confirmation, which asks through the desktop's dialog before each signature.
+  `ssh-add -x` locks the agent and `-X` unlocks it.
+- **An encrypted key** is opened on its first signature. If the `login` collection is
+  unlocked and holds its passphrase, that is used. Otherwise the desktop's dialog asks
+  for it, with **Remember in the login keyring** ticked; a wrong passphrase asks again.
+  A remembered passphrase is an item of the `login` collection with the schema
+  `dev.stubbe.lys.SshKey` and the attributes `fingerprint` and `path`. While `login` is
+  unlocked, that key then signs with no prompt, after a restart too.
+- **Locking `login`**, by the screen, its idle lock or `LockService`, drops every key
+  of `~/.ssh` the agent opened. The next signature reads the remembered passphrase
+  again, or asks. Keys added with `ssh-add` stay until removed or expired.
+- Agent forwarding is the client's choice, as with any agent.
+
 ## Clients it is checked against
 
 The test suite runs the real service on a private bus against `secret-tool`,

@@ -15,7 +15,20 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/peercred"
+	"github.com/stubbedev/lys-lib/xdg"
 )
+
+// Path is $XDG_RUNTIME_DIR/lys-secrets/name as env resolves it, so a
+// process may find a socket of a session other than its own; an error when
+// XDG_RUNTIME_DIR holds no absolute path, since there is no other place the
+// user's session agrees on.
+func Path(env xdg.Env, name string) (string, error) {
+	dir, ok := env.RuntimeDir("lys-secrets")
+	if !ok {
+		return "", errors.New("XDG_RUNTIME_DIR is not set to an absolute path")
+	}
+	return filepath.Join(dir, name), nil
+}
 
 // Listener accepts the user's own connections on a socket.
 type Listener struct {

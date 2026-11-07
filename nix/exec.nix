@@ -23,3 +23,8 @@ cfg:
   then " --confirm-foreign-reads"
   else ""
 )
++ (
+  if cfg.sshAgent.enable
+  then " --ssh-agent"
+  else ""
+)

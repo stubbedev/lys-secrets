@@ -60,8 +60,15 @@ func TestABufHoldsItsBytesUntilDestroyed(t *testing.T) {
 	if string(b.Bytes()) != "hunter2" || len(b.Bytes()) != 7 || cap(b.Bytes()) != 7 {
 		t.Fatalf("Bytes = %q (cap %d)", b.Bytes(), cap(b.Bytes()))
 	}
+	if !b.Holds(b.Bytes()) || !b.Holds(b.Bytes()[2:4]) {
+		t.Error("the buffer does not hold its own bytes")
+	}
+	if b.Holds([]byte("hunter2")) || b.Holds(nil) {
+		t.Error("the buffer holds a heap slice")
+	}
+	view := b.Bytes()[:1]
 	b.Destroy()
-	if !b.Destroyed() || b.Bytes() != nil {
+	if !b.Destroyed() || b.Bytes() != nil || b.Holds(view) {
 		t.Error("a destroyed buffer still holds memory")
 	}
 	b.Destroy()

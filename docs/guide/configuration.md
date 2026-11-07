@@ -10,6 +10,7 @@ the Nix modules write those flags for you.
 | `--unlock-fd N` | none | Read the login password from inherited descriptor `N` and unlock the `login` collection with it, creating the collection if there is none |
 | `--collection-lock-after D` | `0` | Lock a collection once no secret was read from it and nothing in it changed for this long; `0` keeps it open until something locks it |
 | `--collection-lock-on-screen-lock` | off | Lock every collection when logind says the session locked |
+| `--ssh-agent` | off | Serve an SSH agent on `$XDG_RUNTIME_DIR/lys-secrets/ssh`; see [The SSH agent](/guide/how-it-works#the-ssh-agent) |
 | `--confirm-foreign-reads` | off | Ask before a program reads an item another program stored; see [Confirming reads](/guide/security#confirming-reads) |
 | `--vault-lock-after D` | `15m` | Lock the vault once no field was read from it for this long; `0` keeps it open until something locks it |
 | `--vault-sync-interval D` | `30m` | Sync the open vault this often; `0` syncs only on unlock and when asked |
@@ -60,6 +61,7 @@ Both the NixOS and the home-manager module take these, under
 | `collections.lockAfter` | `0` (minutes) | `--collection-lock-after` |
 | `collections.lockOnScreenLock` | `false` | `--collection-lock-on-screen-lock` |
 | `collections.confirmForeignReads` | `false` | `--confirm-foreign-reads` |
+| `sshAgent.enable` | `false` | `--ssh-agent`, and `SSH_AUTH_SOCK` for login shells |
 | `vault.lockAfter` | `15` (minutes) | `--vault-lock-after` |
 | `vault.syncInterval` | `30` (minutes) | `--vault-sync-interval` |
 | `vault.collectionFolder` | `""` | `--vault-collection-folder` |
@@ -94,6 +96,7 @@ The collection is read-only: creating, changing or deleting in it is refused.
 | `$XDG_STATE_HOME/lys-secrets/bitwarden/session.json` | The Bitwarden account: server, email and client id. Its refresh token or API key is in the default collection |
 | `$XDG_STATE_HOME/lys-secrets/bitwarden/device-id` | The device id the Bitwarden server knows this client by |
 | `$XDG_RUNTIME_DIR/lys-secrets/control` | The unlock socket |
+| `$XDG_RUNTIME_DIR/lys-secrets/ssh` | The SSH agent's socket, with `--ssh-agent` |
 
 [How secrets are protected](/guide/security) says what is in them and who can
 read them.

@@ -432,3 +432,32 @@ func TestAChangedLoginPasswordIsTakenOverThroughOneDialog(t *testing.T) {
 		t.Errorf("Rekey over the socket showed a dialog: %+v", passwords)
 	}
 }
+
+// --ssh-agent serves the keys of ~/.ssh on the runtime directory's socket.
+func TestTheSSHAgentListsTheKeysOfDotSSH(t *testing.T) {
+	setup(t)
+	sshAdd, err := exec.LookPath("ssh-add")
+	if err != nil {
+		t.Skip("ssh-add is not installed (the nix dev shell carries it)")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	keygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("ssh-keygen is not installed (the nix dev shell carries it)")
+	}
+	if err := os.Mkdir(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(keygen, "-q", "-t", "ed25519", "-N", "", "-C", "agent@test", "-f", filepath.Join(home, ".ssh", "id_ed25519")).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	d := start(t, "pw", "--ssh-agent")
+	d.waitLog(t, "serving the SSH agent")
+	cmd := exec.Command(sshAdd, "-l")
+	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "lys-secrets", "ssh"))
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "agent@test") || !strings.Contains(string(out), "ED25519") {
+		t.Errorf("ssh-add -l = %q, %v", out, err)
+	}
+}

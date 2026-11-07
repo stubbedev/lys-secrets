@@ -192,6 +192,28 @@ sending any password; it cannot read the collection through it. The same socket'
 re-key request needs the current password of the `login` collection (or the new one,
 when it is re-keyed already), so it cannot take a collection over either.
 
+## The SSH agent
+
+The agent's socket, `$XDG_RUNTIME_DIR/lys-secrets/ssh`, is in the same 0700 directory
+as the unlock socket, and refuses a peer whose `SO_PEERCRED` uid is not yours. Any
+program running as you can use it to sign with any listed key, as with every SSH
+agent; add a key with `ssh-add -c` to confirm each signature.
+
+A decrypted key lives in locked memory like a collection key: off the Go heap, locked
+against swap where the memlock limit allows, excluded from core dumps, and zeroed when
+it is dropped. An Ed25519 key signs straight from there, with lys-secrets' own
+implementation of the signature, since Go's keeps an expanded copy of each key on the
+heap; every secret it derives stays in locked memory or on the stack. Where this stops:
+
+- An RSA or ECDSA key is kept in locked memory as PKCS #8, and parsed onto the Go heap
+  for each signature, because Go signs only with its own key types. Its private numbers
+  are zeroed afterwards, but Go's internal copies of them are not.
+- Opening an encrypted key file passes the decrypted key through the SSH library's heap
+  buffers once, before it is moved into locked memory. A key `ssh-add` sends arrives the
+  same way.
+- The passphrase you type crosses the session bus from the dialog host, as every
+  password typed into a dialog does, and arrives as a Go string.
+
 ## The Bitwarden vault
 
 **On disk**, the vault directory `$XDG_STATE_HOME/lys-secrets/bitwarden` is created

@@ -47,6 +47,19 @@ self: {
     };
   };
 
+  sshAgent.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = ''
+      Serve an SSH agent on `$XDG_RUNTIME_DIR/lys-secrets/ssh` for the keys in
+      `~/.ssh` that have a `.pub` beside them and those added with `ssh-add`,
+      and point `SSH_AUTH_SOCK` at it. An encrypted key's passphrase is asked
+      through the desktop's dialog on first use and can be remembered in the
+      login collection, so keys sign without a prompt while it is unlocked.
+      Do not run another SSH agent as well.
+    '';
+  };
+
   vault = {
     lockAfter = lib.mkOption {
       type = lib.types.ints.unsigned;

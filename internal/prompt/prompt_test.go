@@ -13,6 +13,7 @@ import (
 	"github.com/stubbedev/lys-secrets/internal/dialogtest"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
 	"github.com/stubbedev/lys-secrets/internal/service"
+	"github.com/stubbedev/lys-secrets/internal/sshagent"
 )
 
 func TestOverlappingPromptsGetTheirOwnHandles(t *testing.T) {
@@ -69,5 +70,24 @@ func TestConfirmReadNamesTheProgramAndReadsTheAnswer(t *testing.T) {
 	_, asked = host.Asked()
 	if last := asked[len(asked)-1]; len(last.Choices) != 0 || !strings.Contains(last.Body, "Process 42") {
 		t.Errorf("an unidentified program's dialog showed %+v", last)
+	}
+}
+
+func TestKeyPassphraseOffersToRememberIt(t *testing.T) {
+	bus := dbustest.Session(t)
+	host := &dialogtest.Host{Password: func(r portaldialogs.PasswordRequest) (bool, string, []portaldialogs.Selection) {
+		return true, "phrase", []portaldialogs.Selection{{ID: r.Choices[0].ID, Value: r.Choices[0].Initial}}
+	}}
+	dialogtest.Serve(t, bus.Conn(t), host)
+	d := New(bus.Conn(t))
+	k := sshagent.Key{Path: "/home/u/.ssh/id_ed25519", Fingerprint: "SHA256:abc", Comment: "u@host"}
+	passphrase, remember, ok, err := d.KeyPassphrase(t.Context(), k, true)
+	if err != nil || !ok || !remember || string(passphrase) != "phrase" {
+		t.Fatalf("KeyPassphrase = %q, %v, %v, %v", passphrase, remember, ok, err)
+	}
+	asked, _ := host.Asked()
+	r := asked[0]
+	if !r.Retry || !strings.Contains(r.Body, "u@host") || !strings.Contains(r.Body, "SHA256:abc") || len(r.Choices) != 1 || r.Choices[0].Label != "Remember in the login keyring" || r.Choices[0].Initial != "true" {
+		t.Errorf("the dialog showed %+v", r)
 	}
 }

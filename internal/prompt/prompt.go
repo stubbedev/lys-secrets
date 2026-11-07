@@ -4,6 +4,7 @@
 package prompt
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
 	"github.com/stubbedev/lys-secrets/internal/service"
+	"github.com/stubbedev/lys-secrets/internal/sshagent"
 )
 
 // Dialogs is a service.Prompter over the shell's dialogs.
@@ -45,16 +47,62 @@ func (d *Dialogs) caller(ctx context.Context) (portaldialogs.Caller, func()) {
 }
 
 func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]byte, bool, error) {
+	password, _, ok, err := d.askChoosing(ctx, r)
+	return password, ok, err
+}
+
+// askChoosing asks for a password and the request's choices.
+func (d *Dialogs) askChoosing(ctx context.Context, r portaldialogs.PasswordRequest) ([]byte, []portaldialogs.Selection, bool, error) {
 	caller, done := d.caller(ctx)
 	defer done()
-	ok, password, _, err := d.client.Password(ctx, caller, r)
+	ok, password, picked, err := d.client.Password(ctx, caller, r)
 	if err != nil {
-		return nil, false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
+		return nil, nil, false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
 	}
 	if !ok {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
-	return []byte(password), true, nil
+	return []byte(password), picked, true, nil
+}
+
+// rememberChoice is the checkbox that keeps a passphrase in the login
+// collection.
+var rememberChoice = portaldialogs.Choice{ID: "remember", Label: "Remember in the login keyring", Options: []portaldialogs.Option{}, Initial: "true"}
+
+// remembered reports whether the user left rememberChoice ticked.
+func remembered(picked []portaldialogs.Selection) bool {
+	return slices.Contains(picked, portaldialogs.Selection{ID: rememberChoice.ID, Value: "true"})
+}
+
+// KeyPassphrase asks for an SSH key's passphrase, and whether to remember it.
+func (d *Dialogs) KeyPassphrase(ctx context.Context, k sshagent.Key, retry bool) ([]byte, bool, bool, error) {
+	name := cmp.Or(k.Comment, k.Path)
+	passphrase, picked, ok, err := d.askChoosing(ctx, portaldialogs.PasswordRequest{
+		Title:       "Unlock SSH key",
+		Body:        fmt.Sprintf("Enter the passphrase of the SSH key “%s” (%s) to sign with it.", name, k.Fingerprint),
+		Retry:       retry,
+		AcceptLabel: "Unlock",
+		Choices:     []portaldialogs.Choice{rememberChoice},
+	})
+	return passphrase, remembered(picked), ok, err
+}
+
+// ConfirmUse asks whether an SSH key added with ssh-add -c may sign.
+func (d *Dialogs) ConfirmUse(ctx context.Context, k sshagent.Key) (bool, error) {
+	caller, done := d.caller(ctx)
+	defer done()
+	granted, _, err := d.client.Access(ctx, caller, portaldialogs.AccessRequest{
+		Title:      "Use SSH key?",
+		Subtitle:   fmt.Sprintf("A program wants to sign with the SSH key “%s”.", cmp.Or(k.Comment, k.Fingerprint)),
+		Body:       "Fingerprint: " + k.Fingerprint,
+		GrantLabel: "Allow",
+		DenyLabel:  "Deny",
+		Icon:       "dialog-password",
+	})
+	if err != nil {
+		return false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
+	}
+	return granted, nil
 }
 
 // Password asks for an existing collection's password.

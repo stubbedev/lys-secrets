@@ -108,6 +108,9 @@ type Config struct {
 	// ConfirmForeignReads asks the user before a program reads an item it
 	// does not own.
 	ConfirmForeignReads bool
+	// Locked, when set, runs each time a collection locks, with its id, under
+	// the service's lock: it must not call back into the Service.
+	Locked func(id string)
 }
 
 // Service is a running Secret Service.
@@ -844,6 +847,9 @@ func (s *Service) lockCollectionLocked(c *collection) {
 		log.Printf("secrets: lock collection %s: its key is destroyed, but it opens again only after a restart: %v", c.id, err)
 	}
 	s.dropGrantsLocked(c.id)
+	if s.cfg.Locked != nil {
+		s.cfg.Locked(c.id)
+	}
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 }
 
