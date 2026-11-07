@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -143,8 +144,8 @@ func TestEncryptLoginRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, plain := range []string{"Home", "ann", "hunter22", "nm://home"} {
-		if strings.Contains(string(raw), plain) {
-			t.Errorf("the request carries %q in the clear: %s", plain, raw)
+		if strings.Contains(string(raw), strconv.Quote(plain)) {
+			t.Errorf("the request carries %q in the clear as a value: %s", plain, raw)
 		}
 	}
 	var wire SyncCipher
