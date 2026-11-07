@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbustest"
+	"github.com/stubbedev/lys-lib/portaldialogs"
 	"github.com/stubbedev/lys-lib/sockdir"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 	"github.com/stubbedev/lys-lib/xdg"
@@ -368,5 +369,65 @@ func TestTheUsageLineNamesEveryFlag(t *testing.T) {
 		if !strings.Contains(doc, "[--"+m[1]) {
 			t.Errorf("the usage line omits --%s", m[1])
 		}
+	}
+}
+
+// After the account's password changed, the lock screen's password does not
+// open the login collection: the dialog host asks once for the previous one,
+// which moves the collection to the new password for good.
+func TestAChangedLoginPasswordIsTakenOverThroughOneDialog(t *testing.T) {
+	setup(t)
+	d := start(t, "old-pw")
+	d.waitLog(t, "serving org.freedesktop.secrets")
+	if _, err := secretTool(t, "v1", "store", "--label=x", "app", "a"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	_ = d.cmd.Process.Signal(syscall.SIGTERM)
+	_ = d.cmd.Wait()
+
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	answered := make(chan struct{}, 4)
+	host := &fakeHost{password: func(portaldialogs.PasswordRequest) (bool, string, []portaldialogs.Selection) {
+		defer func() { answered <- struct{}{} }()
+		return true, "old-pw", nil
+	}}
+	serveHost(t, conn, host)
+	d = start(t, "")
+	d.waitLog(t, "serving org.freedesktop.secrets")
+	sock, err := control.SocketPath(xdg.OS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.Unlock(sock, []byte("new-pw")); !errors.Is(err, control.ErrWrongPassword) {
+		t.Fatalf("the new password before the re-key = %v", err)
+	}
+	select {
+	case <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no dialog asked for the previous password")
+	}
+	d.waitLog(t, "moved to the new login password")
+	if got, err := secretTool(t, "", "lookup", "app", "a"); err != nil || got != "v1" {
+		t.Errorf("lookup after the re-key = %q, %v", got, err)
+	}
+	if err := conn.Object(service.BusName, "/org/freedesktop/secrets").Call("org.freedesktop.Secret.Service.LockService", 0).Err; err != nil {
+		t.Fatal(err)
+	}
+	if err := control.Unlock(sock, []byte("new-pw")); err != nil {
+		t.Errorf("the new password after the re-key = %v", err)
+	}
+	passwords, _ := host.asked()
+	if len(passwords) != 1 || passwords[0].AcceptLabel != "Update" || passwords[0].CancelLabel != "Keep the old password" {
+		t.Errorf("asked %+v, want one dialog with Update and Keep the old password", passwords)
+	}
+	if err := control.Rekey(sock, []byte("new-pw"), []byte("newer-pw")); err != nil {
+		t.Errorf("Rekey over the socket = %v", err)
+	}
+	if passwords, _ := host.asked(); len(passwords) != 1 {
+		t.Errorf("Rekey over the socket showed a dialog: %+v", passwords)
 	}
 }

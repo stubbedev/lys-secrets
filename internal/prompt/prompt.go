@@ -35,7 +35,7 @@ func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]b
 		case <-done:
 		}
 	}()
-	ok, password, err := d.client.Password(ctx, caller, r)
+	ok, password, _, err := d.client.Password(ctx, caller, r)
 	if err != nil {
 		return nil, false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
 	}
@@ -69,5 +69,16 @@ func (d *Dialogs) MasterPassword(ctx context.Context, retry bool) ([]byte, bool,
 		Title: "Unlock Bitwarden",
 		Body:  "An application wants a password from your Bitwarden vault, which is locked. Enter your master password.",
 		Retry: retry,
+	})
+}
+
+// PreviousLoginPassword asks for the login password from before it changed.
+func (d *Dialogs) PreviousLoginPassword(ctx context.Context, retry bool) ([]byte, bool, error) {
+	return d.ask(ctx, portaldialogs.PasswordRequest{
+		Title:       "Your login password changed",
+		Body:        "Enter your previous password to update the login keyring. To keep the keyring on its old password, apart from your login, keep the old password; it then asks for that password when an application needs it.",
+		Retry:       retry,
+		AcceptLabel: "Update",
+		CancelLabel: "Keep the old password",
 	})
 }

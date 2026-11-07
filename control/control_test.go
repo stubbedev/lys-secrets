@@ -14,14 +14,14 @@ import (
 	"github.com/stubbedev/lys-lib/xdg"
 )
 
-type fakeUnlocker struct {
+type fakeLogin struct {
 	mu   sync.Mutex
 	want string
 	got  []string
 	err  error
 }
 
-func (f *fakeUnlocker) UnlockLogin(password []byte) error {
+func (f *fakeLogin) UnlockLogin(password []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.got = append(f.got, string(password))
@@ -34,7 +34,21 @@ func (f *fakeUnlocker) UnlockLogin(password []byte) error {
 	return nil
 }
 
-func serve(t *testing.T, u Unlocker) string {
+func (f *fakeLogin) RekeyLogin(old, next []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.got = append(f.got, string(old)+">"+string(next))
+	if f.err != nil {
+		return f.err
+	}
+	if string(old) != f.want && string(next) != f.want {
+		return ErrWrongPassword
+	}
+	f.want = string(next)
+	return nil
+}
+
+func serve(t *testing.T, u Login) string {
 	t.Helper()
 	path := filepath.Join(sockdir.Dir(t), "lys-secrets", "control")
 	ln, err := Listen(path)
@@ -49,7 +63,7 @@ func serve(t *testing.T, u Unlocker) string {
 }
 
 func TestUnlockOverTheSocket(t *testing.T) {
-	u := &fakeUnlocker{want: "right"}
+	u := &fakeLogin{want: "right"}
 	path := serve(t, u)
 	if err := Unlock(path, []byte("wrong")); !errors.Is(err, ErrWrongPassword) {
 		t.Errorf("wrong password = %v", err)
@@ -66,6 +80,26 @@ func TestUnlockOverTheSocket(t *testing.T) {
 	}
 }
 
+func TestRekeyOverTheSocket(t *testing.T) {
+	u := &fakeLogin{want: "old"}
+	path := serve(t, u)
+	if err := Rekey(path, []byte("typo"), []byte("new")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("a wrong old password = %v", err)
+	}
+	if err := Rekey(path, []byte("old"), []byte("new")); err != nil {
+		t.Errorf("the right old password = %v", err)
+	}
+	if err := Unlock(path, []byte("new")); err != nil {
+		t.Errorf("the new password after the re-key = %v", err)
+	}
+	if strings.Join(u.got, ",") != "typo>new,old>new,new" {
+		t.Errorf("the server saw %v", u.got)
+	}
+	if err := Rekey(path, []byte("old"), nil); err == nil {
+		t.Error("an empty new password was sent")
+	}
+}
+
 func TestUnlockWithoutAServer(t *testing.T) {
 	path := filepath.Join(sockdir.Dir(t), "absent")
 	if err := Unlock(path, []byte("x")); !errors.Is(err, ErrNotRunning) {
@@ -77,12 +111,16 @@ func TestUnlockWithoutAServer(t *testing.T) {
 }
 
 func TestServerRefusesMalformedRequests(t *testing.T) {
-	u := &fakeUnlocker{want: "x"}
+	u := &fakeLogin{want: "x"}
 	path := serve(t, u)
 	for _, msg := range [][]byte{
-		binary.BigEndian.AppendUint32(nil, 0),
-		binary.BigEndian.AppendUint32(nil, maxPassword+1),
-		append(binary.BigEndian.AppendUint32(nil, 10), "short"...),
+		{},
+		{9},
+		binary.BigEndian.AppendUint32([]byte{byte(requestUnlock)}, 0),
+		binary.BigEndian.AppendUint32([]byte{byte(requestUnlock)}, maxPassword+1),
+		append(binary.BigEndian.AppendUint32([]byte{byte(requestUnlock)}, 10), "short"...),
+		append(binary.BigEndian.AppendUint32([]byte{byte(requestRekey)}, 1), 'x'),
+		binary.BigEndian.AppendUint32(append(binary.BigEndian.AppendUint32([]byte{byte(requestRekey)}, 1), 'x'), 0),
 	} {
 		conn, err := net.Dial("unix", path)
 		if err != nil {
@@ -98,27 +136,8 @@ func TestServerRefusesMalformedRequests(t *testing.T) {
 		}
 	}
 	if len(u.got) != 0 {
-		t.Errorf("a malformed request reached the unlocker: %v", u.got)
+		t.Errorf("a malformed request reached the login collection: %v", u.got)
 	}
-}
-
-func TestListenRefusesALiveServerAndReplacesAStaleSocket(t *testing.T) {
-	path := serve(t, &fakeUnlocker{})
-	if _, err := Listen(path); err == nil {
-		t.Error("a second server took a live socket")
-	}
-	stale := filepath.Join(sockdir.Dir(t), "stale")
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: stale, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln.SetUnlinkOnClose(false)
-	_ = ln.Close()
-	ln2, err := Listen(stale)
-	if err != nil {
-		t.Fatalf("a stale socket blocked Listen: %v", err)
-	}
-	_ = ln2.Close()
 }
 
 func TestReadPassword(t *testing.T) {

@@ -537,3 +537,23 @@ func TestACloneChangesWithoutTheOriginalAndCommitsOrDiscards(t *testing.T) {
 		t.Errorf("the committed clone reads %q, %v", secret, err)
 	}
 }
+
+func TestAVerifierTellsTheRightPasswordFromAWrongOne(t *testing.T) {
+	c := newTestCollection(t, "pw")
+	v, err := c.Verifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Verify([]byte("pw"), Argon2id); err != nil {
+		t.Errorf("the right password = %v", err)
+	}
+	if err := v.Verify([]byte("other"), Argon2id); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("a wrong password = %v, want ErrWrongPassword", err)
+	}
+	if err := c.Lock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Verifier(); !errors.Is(err, ErrLocked) {
+		t.Errorf("a locked collection's Verifier = %v, want ErrLocked", err)
+	}
+}

@@ -264,7 +264,7 @@ func (m serviceMethods) ChangeLock(collection dbus.ObjectPath) (dbus.ObjectPath,
 			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}
-		if err := s.change(c, func(kr *keyring.Collection) error { return kr.ChangeKey(rekey) }, nothingToAnnounce); err != nil {
+		if err := s.changeKey(c, rekey); err != nil {
 			log.Printf("secrets: change the password of %s: %v", c.id, err)
 			return true, dbus.MakeVariant("")
 		}

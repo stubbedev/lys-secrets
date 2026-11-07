@@ -446,6 +446,38 @@ func (c *Collection) Marshal() ([]byte, error) {
 	return append(c.header(), body...), nil
 }
 
+// Verifier tests a password against an unlocked collection's key check,
+// outside the lock that guards the collection, since deriving the key takes as
+// long as the KDF makes it.
+type Verifier struct {
+	salt  []byte
+	kdf   KDF
+	check []byte
+}
+
+// Verifier is what testing a password against the collection needs. A locked
+// collection is tested by unlocking it.
+func (c *Collection) Verifier() (*Verifier, error) {
+	if c.key == nil {
+		return nil, ErrLocked
+	}
+	return &Verifier{salt: c.salt, kdf: c.kdf, check: c.check}, nil
+}
+
+// Verify derives the key password gives and tests it against the key check: a
+// password that finds another key is ErrWrongPassword.
+func (v *Verifier) Verify(password []byte, stretch Stretch) error {
+	k, err := deriveKey(password, v.salt, v.kdf, stretch)
+	if err != nil {
+		return err
+	}
+	defer k.destroy()
+	if _, err := k.open(v.check, keyCheckAD); err != nil {
+		return ErrWrongPassword
+	}
+	return nil
+}
+
 // Rekey is a new key for a collection, derived outside the lock that guards it.
 // Whoever gives up on one calls Discard.
 type Rekey struct {

@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `vault` | The Bitwarden vault's D-Bus contract and client | lys-shell's vault widget, launcher mode and network agent |
 | `client` | A Secret Service client | lys-shell's Secret portal, for per-app master secrets |
-| `control` | The unlock socket's client and server | lys-login, to unlock the `login` collection |
+| `control` | The unlock socket's client and server | lys-login, to unlock the `login` collection and re-key it on a password change |
 | `secretstest` | The real Secret Service on a test's private bus, with scripted password prompts | Consumers' tests |
 
 Everything else is `internal/`.

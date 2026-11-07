@@ -146,6 +146,13 @@ socket is in a 0700 directory, and the server refuses a peer whose `SO_PEERCRED`
 is not yours. Any program running as you can still connect and try a password; a
 try costs one Argon2id derivation, with no other limit.
 
+A password that does not open the `login` collection is kept, in locked memory like
+a collection key, only while the dialog asking for your previous password is up, and
+is zeroed when it closes. A program running as you can make that dialog appear by
+sending any password; it cannot read the collection through it. The same socket's
+re-key request needs the current password of the `login` collection (or the new one,
+when it is re-keyed already), so it cannot take a collection over either.
+
 ## The Bitwarden vault
 
 **On disk**, the vault directory `$XDG_STATE_HOME/lys-secrets/bitwarden` is created

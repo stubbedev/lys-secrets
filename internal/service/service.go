@@ -79,6 +79,11 @@ type Prompter interface {
 	// MasterPassword asks for the Bitwarden vault's master password;
 	// retry says the previous attempt was wrong.
 	MasterPassword(ctx context.Context, retry bool) (password []byte, ok bool, err error)
+	// PreviousLoginPassword asks for the login password from before it
+	// changed, to move the login collection to the new one; ok is false
+	// when the user keeps the old password apart. retry says the previous
+	// attempt was wrong.
+	PreviousLoginPassword(ctx context.Context, retry bool) (password []byte, ok bool, err error)
 }
 
 // Config is what Start needs.
@@ -106,8 +111,12 @@ type Service struct {
 	// signals sends what the service emits, off its lock.
 	signals *signalQueue
 
-	// loginMu keeps two logins from creating the login collection at once.
+	// loginMu keeps two logins from creating the login collection at once,
+	// and a re-key from racing either.
 	loginMu sync.Mutex
+	// rekey is the question a login password that does not open the login
+	// collection raises.
+	rekey rekeyOffer
 	// aliasWriter is held across a change of the alias table, its write and its
 	// commit, so the table a reader sees is always the one on disk.
 	aliasWriter sync.Mutex
@@ -293,6 +302,7 @@ func (s *Service) Close() {
 	defer s.signals.drain(time.After(signalDrainWait))
 	defer s.mu.Unlock()
 	s.closed = true
+	s.dropRekey()
 	if s.idle != nil {
 		s.idle.Stop()
 		s.idle = nil
@@ -314,7 +324,9 @@ func (s *Service) now() time.Time {
 // logged in or unlocked the session with, creating it with that password
 // on first use and pointing the default alias at it when none is set. A
 // wrong password matches both control.ErrWrongPassword and
-// keyring.ErrWrongPassword, and leaves it locked.
+// keyring.ErrWrongPassword, and leaves it locked: the login password
+// changed, so the user is asked once for the previous one, to move the
+// collection to this one.
 func (s *Service) UnlockLogin(password []byte) error {
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
@@ -324,8 +336,12 @@ func (s *Service) UnlockLogin(password []byte) error {
 	s.mu.Unlock()
 	if ok {
 		err := s.unlock(c, password)
-		if errors.Is(err, keyring.ErrWrongPassword) {
+		switch {
+		case errors.Is(err, keyring.ErrWrongPassword):
+			s.offerRekey(password)
 			return fmt.Errorf("%w: %w", control.ErrWrongPassword, err)
+		case err == nil:
+			s.dropRekey()
 		}
 		return err
 	}

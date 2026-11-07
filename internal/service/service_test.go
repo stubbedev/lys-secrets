@@ -63,6 +63,14 @@ func (f *fakePrompter) MasterPassword(_ context.Context, retry bool) ([]byte, bo
 	return f.next(kind)
 }
 
+func (f *fakePrompter) PreviousLoginPassword(_ context.Context, retry bool) ([]byte, bool, error) {
+	kind := "previous login"
+	if retry {
+		kind += " retry"
+	}
+	return f.next(kind)
+}
+
 func (f *fakePrompter) script(answers ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

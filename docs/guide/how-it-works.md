@@ -59,13 +59,36 @@ reads the collection as it is on disk, and the reply and the signal come after. 
 nothing a client reads can be lost to a crash. A collection locked while one of its
 changes is being written stays locked, and holds the change when it is unlocked.
 
-Changing your login password does not re-encrypt the collection, so your new
-password does not open it. Ask for a new collection password with `ChangeLock`,
-then show the prompt it returns:
+### When your login password changes
+
+The `login` collection is encrypted under the password it was created with, so a new
+login password does not open it. The first time lys-login hands over a password that
+does not open it, lys-secrets keeps that password in locked memory and asks once,
+through the desktop's dialog, for your previous password:
+
+- **Update** opens the collection with the previous password and re-encrypts it under
+  the new one, through the same atomic write as any other change. It stays unlocked,
+  and from then on the new password opens it at every login and unlock. A wrong
+  previous password asks again.
+- **Keep the old password** closes the dialog and leaves the file as it was, for a
+  keyring you want on a password of its own. It then asks for that password when an
+  application needs it, as any locked collection does.
+
+Either way the new password is zeroed when the dialog closes. If another password
+arrives while the dialog is up, the newest one is used; if one opens the collection,
+the dialog goes away.
+
+A password change that knows both passwords re-encrypts the collection with no dialog,
+over the same socket lys-login unlocks through: `control.Rekey(path, old, new)` from
+the `control` package. Running it twice is safe, and with no `login` collection yet
+there is nothing to do.
+
+Any other collection keeps its own password. Change one with `ChangeLock`, then show
+the prompt it returns:
 
 ```sh
 busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
-  org.freedesktop.Secret.Service ChangeLock o /org/freedesktop/secrets/collection/login
+  org.freedesktop.Secret.Service ChangeLock o /org/freedesktop/secrets/collection/<id>
 busctl --user call org.freedesktop.secrets <the returned prompt path> \
   org.freedesktop.Secret.Prompt Prompt s ""
 ```
