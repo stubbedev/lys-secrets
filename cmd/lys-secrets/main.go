@@ -3,8 +3,9 @@
 // Electron apps, git's credential helper and the portal's Secret backend
 // keep their secrets in collections encrypted at rest under
 // $XDG_DATA_HOME/lys-secrets. It also holds the user's Bitwarden vault
-// (dev.stubbe.lys.Vault1), its session under
-// $XDG_STATE_HOME/lys-secrets/bitwarden. It is a small process of its
+// (dev.stubbe.lys.Vault1): its account under
+// $XDG_STATE_HOME/lys-secrets/bitwarden, the credential that renews it
+// in the Secret Service's default collection. It is a small process of its
 // own, apart from the shell, so the code holding unlocked keys is only
 // this.
 //
@@ -39,6 +40,7 @@ import (
 	"github.com/stubbedev/lys-lib/xdg"
 	"golang.org/x/sys/unix"
 
+	"github.com/stubbedev/lys-secrets/client"
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/internal/bitwarden"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
@@ -201,7 +203,7 @@ func lockOnScreenLock(ctx context.Context, svc *service.Service) {
 // ends; changed runs after each change of it. release drops the name.
 func serveVault(ctx context.Context, conn *dbus.Conn, dir string, policy bitwarden.Policy, changed func()) (*bitwarden.Service, func(), error) {
 	var d *vault.Daemon
-	bw, err := bitwarden.Open(dir, vaultDevice, func() {
+	bw, err := bitwarden.Open(dir, vaultDevice, client.NewKeychain(conn), func() {
 		if err := d.Changed(); err != nil {
 			log.Printf("lys-secrets: %v", err)
 		}

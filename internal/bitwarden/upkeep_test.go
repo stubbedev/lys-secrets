@@ -43,7 +43,7 @@ func TestSyncDue(t *testing.T) {
 // once unused for LockAfter; LockAfter 0 never locks.
 func TestUpkeepRun(t *testing.T) {
 	a := newAccount(t)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	clock := upkeepNow
 	s.now = func() time.Time { return clock }
 	if err := s.Login(context.Background(), login(a)); err != nil {
@@ -99,7 +99,7 @@ func TestUpkeepReport(t *testing.T) {
 // opens locks it on time, with no tick to wait for.
 func TestKeepLocksAnOpenedVaultOnItsDeadline(t *testing.T) {
 	a := newAccount(t)
-	s, err := Open(t.TempDir(), "lys-secrets", func() {})
+	s, err := Open(t.TempDir(), "lys-secrets", newKeychain(), func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestKeepLocksAnOpenedVaultOnItsDeadline(t *testing.T) {
 // With a sync due every interval and no lock, Keep syncs by itself, and a
 // sync another caller has running moves the deadline instead of spinning.
 func TestUpkeepNext(t *testing.T) {
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	u := upkeep{s: s.Service, policy: Policy{LockAfter: time.Minute, SyncInterval: time.Hour}}
 	if at, ok := u.next(); ok {
 		t.Errorf("a closed vault has a deadline at %v", at)
@@ -163,7 +163,7 @@ func TestUpkeepNext(t *testing.T) {
 }
 
 func TestTheClockHasNoMonotonicReading(t *testing.T) {
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	if now := s.now(); now != now.Round(0) {
 		t.Errorf("s.now() = %v carries a monotonic reading, which stops during a suspend", now)
 	}
@@ -173,7 +173,7 @@ func TestTheClockHasNoMonotonicReading(t *testing.T) {
 // moved on well before the timer's own deadline comes round.
 func TestKeepLocksSoonAfterASuspendLongerThanTheIdleTime(t *testing.T) {
 	a := newAccount(t)
-	s, err := Open(t.TempDir(), "lys-secrets", func() {})
+	s, err := Open(t.TempDir(), "lys-secrets", newKeychain(), func() {})
 	if err != nil {
 		t.Fatal(err)
 	}

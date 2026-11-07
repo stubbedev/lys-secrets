@@ -89,7 +89,7 @@ The collection is read-only: creating, changing or deleting in it is refused.
 | --- | --- |
 | `$XDG_DATA_HOME/lys-secrets/<id>.keyring` | One collection |
 | `$XDG_DATA_HOME/lys-secrets/aliases.json` | Which collection each alias, such as `default`, points at |
-| `$XDG_STATE_HOME/lys-secrets/bitwarden/session.json` | The Bitwarden session |
+| `$XDG_STATE_HOME/lys-secrets/bitwarden/session.json` | The Bitwarden account: server, email and client id. Its refresh token or API key is in the default collection |
 | `$XDG_STATE_HOME/lys-secrets/bitwarden/device-id` | The device id the Bitwarden server knows this client by |
 | `$XDG_RUNTIME_DIR/lys-secrets/control` | The unlock socket |
 

@@ -107,10 +107,13 @@ self-hosted server or Vaultwarden. lys-shell's vault dropdown, launcher mode and
 NetworkManager secret agent are views over it, so the one process holding the
 vault's keys is this one.
 
-It keeps [only the session](/guide/security#the-bitwarden-vault) on disk. An unlock
-always fetches a fresh sync from the server, so the vault cannot open offline. After
-a login with a personal API key the server issues no refresh token, so a vault that
-locked needs a new login.
+It keeps [only the session](/guide/security#the-bitwarden-vault): the account on disk,
+and the credential that renews it in the Secret Service's default collection. A
+restart therefore leaves the vault locked, as Bitwarden's own clients do, and only
+the master password opens it again, with no email or second factor. An unlock
+always fetches a fresh sync from the server, so the vault cannot open offline. A
+login with a personal API key has no refresh token, so the API key itself is the
+credential kept, and an unlock logs in with it again.
 
 ### `dev.stubbe.lys.Vault1`
 

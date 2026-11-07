@@ -133,6 +133,13 @@ func (a *account) token(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"error": "invalid_grant"})
 			return
 		}
+	case "client_credentials":
+		if f.Get("client_id") != testAPIKeyID || f.Get("client_secret") != testAPIKeySecret {
+			writeJSON(w, 400, map[string]any{"error": "invalid_client"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"access_token": "at-api", "expires_in": 3600, "token_type": "Bearer"})
+		return
 	}
 	a.refresh += "+"
 	writeJSON(w, 200, map[string]any{"access_token": "at-" + a.refresh, "refresh_token": a.refresh, "expires_in": 3600, "token_type": "Bearer"})
@@ -201,11 +208,11 @@ type counted struct {
 	changes int
 }
 
-// openService opens the service in dir, failing the test when it cannot.
-func openService(t *testing.T, dir string) *counted {
+// openService opens the service in h, failing the test when it cannot.
+func openService(t *testing.T, h home) *counted {
 	t.Helper()
 	c := &counted{}
-	s, err := Open(dir, "lys-secrets", func() { c.changes++ })
+	s, err := Open(h.dir, "lys-secrets", h.keys, func() { c.changes++ })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +242,7 @@ func closed(s *counted) bool {
 // items, keeping the account's keys and master password.
 func opened(t *testing.T, a *account, items ...Item) *counted {
 	t.Helper()
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -255,30 +262,31 @@ func login(a *account) vault.LoginRequest {
 // A fresh directory starts logged out with a private device id that
 // survives a reopen.
 func TestOpenRegistersADevice(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir, "lys-secrets", func() {})
+	h := newHome(t)
+	s, err := Open(h.dir, "lys-secrets", h.keys, func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st := s.Status(); st.State != vault.StateLoggedOut {
 		t.Errorf("state = %v", st.State)
 	}
-	info, err := os.Stat(filepath.Join(dir, deviceFile))
+	info, err := os.Stat(filepath.Join(h.dir, deviceFile))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("device file %v, %v", info, err)
 	}
-	again, err := Open(dir, "lys-secrets", func() {})
+	again, err := Open(h.dir, "lys-secrets", h.keys, func() {})
 	if err != nil || again.device.ID != s.device.ID || len(s.device.ID) != 36 {
 		t.Errorf("device id %q then %q", s.device.ID, again.device.ID)
 	}
 }
 
-// A login opens the vault and saves only the session: server, email,
-// refresh token, client id; never the password, a key or an item.
+// A login opens the vault and saves only the session: server, email and
+// client id on disk, the refresh token in the keyring; never the password,
+// a key or an item.
 func TestLoginOpensTheVault(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -289,19 +297,19 @@ func TestLoginOpensTheVault(t *testing.T) {
 	if items := listed(t, s); len(items) != 1 || items[0].Name != "Default collection" {
 		t.Errorf("items = %+v", items)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, sessionFile))
+	raw, err := os.ReadFile(filepath.Join(h.dir, sessionFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"asdfasdfasdf", "Default collection", testUserKey[:20], "at-"} {
+	for _, secret := range []string{"asdfasdfasdf", "Default collection", testUserKey[:20], "at-", "rt-"} {
 		if strings.Contains(string(raw), secret) {
 			t.Errorf("the session file holds %q", secret)
 		}
 	}
-	if !strings.Contains(string(raw), a.refresh) {
-		t.Errorf("the session file lacks the refresh token: %s", raw)
+	if got := h.keys.only(t); got != (credential{RefreshToken: a.refresh}) {
+		t.Errorf("the keyring keeps %+v, want the refresh token %s alone", got, a.refresh)
 	}
-	if info, _ := os.Stat(filepath.Join(dir, sessionFile)); info.Mode().Perm() != 0o600 {
+	if info, _ := os.Stat(filepath.Join(h.dir, sessionFile)); info.Mode().Perm() != 0o600 {
 		t.Errorf("session file mode %v", info.Mode().Perm())
 	}
 }
@@ -311,7 +319,7 @@ func TestLoginOpensTheVault(t *testing.T) {
 // code opens the vault.
 func TestLoginFailuresAndSecondFactor(t *testing.T) {
 	a := newAccount(t)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	bad := login(a)
 	bad.Password = "nope"
 	if err := s.Login(context.Background(), bad); !errors.Is(err, vault.ErrInvalidCredentials) || s.Status().State != vault.StateLoggedOut || s.Status().Err == nil {
@@ -334,8 +342,8 @@ func TestLoginFailuresAndSecondFactor(t *testing.T) {
 // rotated one), and a wrong master password leaves it locked.
 func TestLockAndUnlock(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +352,7 @@ func TestLockAndUnlock(t *testing.T) {
 	if s.Status().State != vault.StateLocked || !closed(s) || s.kr != nil || len(kr.Orgs) != 0 {
 		t.Errorf("after Lock: status %+v, keyring %v", s.Status(), s.kr)
 	}
-	restarted := openService(t, dir)
+	restarted := openService(t, h)
 	if restarted.Status().State != vault.StateLocked {
 		t.Fatalf("restart = %+v", restarted.Status())
 	}
@@ -354,9 +362,8 @@ func TestLockAndUnlock(t *testing.T) {
 	if err := restarted.Unlock(context.Background(), "asdfasdfasdf"); err != nil || restarted.Status().State != vault.StateUnlocked {
 		t.Fatalf("unlock = %v, status %+v", err, restarted.Status())
 	}
-	sess, _ := loadSession(filepath.Join(dir, sessionFile))
-	if sess.RefreshToken != a.refresh {
-		t.Errorf("saved refresh token %q, want the rotated %q", sess.RefreshToken, a.refresh)
+	if got := h.keys.only(t).RefreshToken; got != a.refresh {
+		t.Errorf("kept refresh token %q, want the rotated %q", got, a.refresh)
 	}
 }
 
@@ -364,8 +371,8 @@ func TestLockAndUnlock(t *testing.T) {
 // says to log in again.
 func TestRevokedRefreshLogsOut(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -377,8 +384,11 @@ func TestRevokedRefreshLogsOut(t *testing.T) {
 	if s.Status().State != vault.StateLoggedOut {
 		t.Errorf("state = %v", s.Status().State)
 	}
-	if _, err := os.Stat(filepath.Join(dir, sessionFile)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(h.dir, sessionFile)); !os.IsNotExist(err) {
 		t.Errorf("session file survived: %v", err)
+	}
+	if !h.keys.empty() {
+		t.Error("the keyring still keeps the revoked session")
 	}
 }
 
@@ -386,7 +396,7 @@ func TestRevokedRefreshLogsOut(t *testing.T) {
 // token first; while locked it is an error.
 func TestServiceSync(t *testing.T) {
 	a := newAccount(t)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	clock := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return clock }
 	if err := s.Login(context.Background(), login(a)); err != nil {
@@ -417,16 +427,16 @@ func TestServiceSync(t *testing.T) {
 func TestLogout(t *testing.T) {
 	a := newAccount(t)
 	a.revocable(http.StatusOK)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
-	current := s.session().RefreshToken
+	current := h.keys.only(t).RefreshToken
 	if err := s.Logout(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requireLoggedOut(t, s, dir)
+	requireLoggedOut(t, s, h)
 	if s.Status().Err != nil {
 		t.Errorf("status error %v after a revoked session", s.Status().Err)
 	}
@@ -437,15 +447,18 @@ func TestLogout(t *testing.T) {
 	}
 }
 
-func requireLoggedOut(t *testing.T, s *counted, dir string) {
+func requireLoggedOut(t *testing.T, s *counted, h home) {
 	t.Helper()
 	if st := s.Status(); st.State != vault.StateLoggedOut || !closed(s) || s.session() != nil {
 		t.Errorf("status %+v, session %v", st, s.session())
 	}
-	if _, err := os.Stat(filepath.Join(dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(h.dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the session file: %v, want it gone", err)
 	}
-	if again := openService(t, dir); again.Status().State != vault.StateLoggedOut {
+	if !h.keys.empty() {
+		t.Error("the keyring still keeps the session")
+	}
+	if again := openService(t, h); again.Status().State != vault.StateLoggedOut {
 		t.Error("a reopened service still has the session")
 	}
 }
@@ -455,8 +468,8 @@ func requireLoggedOut(t *testing.T, s *counted, dir string) {
 // many logouts there are.
 func TestLogoutOnAServerWithNoRevocationIsItsOwnResult(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	var logged []string
 	s.logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 	for range 2 {
@@ -471,7 +484,7 @@ func TestLogoutOnAServerWithNoRevocationIsItsOwnResult(t *testing.T) {
 		if st := s.Status(); st.State != vault.StateLoggedOut || st.Err != nil {
 			t.Errorf("status = %+v, want logged out with no error", st)
 		}
-		if _, err := os.Stat(filepath.Join(dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
+		if _, err := os.Stat(filepath.Join(h.dir, sessionFile)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("the session file: %v, want it gone", err)
 		}
 	}
@@ -488,8 +501,8 @@ func TestLogoutOnAServerWithNoRevocationIsItsOwnResult(t *testing.T) {
 func TestAFailedRevocationStaysAnErrorInTheStatus(t *testing.T) {
 	a := newAccount(t)
 	a.revocable(http.StatusServiceUnavailable)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	s.logf = func(string, ...any) { t.Error("logged a failed attempt as an unsupported server") }
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
@@ -501,24 +514,24 @@ func TestAFailedRevocationStaysAnErrorInTheStatus(t *testing.T) {
 	if !errors.Is(s.Status().Err, vault.ErrSessionNotRevoked) {
 		t.Errorf("status error = %v", s.Status().Err)
 	}
-	requireLoggedOut(t, s, dir)
+	requireLoggedOut(t, s, h)
 }
 
 func TestAFailedRemovalIsNotHiddenByAServerThatCannotRevoke(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	s.logf = func(string, ...any) {}
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(dir, sessionFile)); err != nil {
+	if err := os.Remove(filepath.Join(h.dir, sessionFile)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(dir, sessionFile), privateDirMode); err != nil {
+	if err := os.Mkdir(filepath.Join(h.dir, sessionFile), privateDirMode); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, sessionFile, "x"), nil, privateFileMode); err != nil {
+	if err := os.WriteFile(filepath.Join(h.dir, sessionFile, "x"), nil, privateFileMode); err != nil {
 		t.Fatal(err)
 	}
 	err := s.Logout(context.Background())
@@ -529,8 +542,8 @@ func TestAFailedRemovalIsNotHiddenByAServerThatCannotRevoke(t *testing.T) {
 
 func TestLogoutWithTheServerDownStillForgetsTheSession(t *testing.T) {
 	a := newAccount(t)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -539,24 +552,24 @@ func TestLogoutWithTheServerDownStillForgetsTheSession(t *testing.T) {
 	if !errors.Is(err, vault.ErrSessionNotRevoked) || !errors.Is(err, vault.ErrUnreachable) {
 		t.Errorf("Logout = %v, want ErrSessionNotRevoked and ErrUnreachable", err)
 	}
-	requireLoggedOut(t, s, dir)
+	requireLoggedOut(t, s, h)
 }
 
 func TestLogoutOfAnAPIKeySessionHasNothingToRevoke(t *testing.T) {
 	a := newAccount(t)
 	a.revocable(http.StatusOK)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
-	s.sess.RefreshToken = ""
+	s.cred = &credential{ClientSecret: "secret"}
 	s.mu.Unlock()
 	if err := s.Logout(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requireLoggedOut(t, s, dir)
+	requireLoggedOut(t, s, h)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.revoked) != 0 {
@@ -567,7 +580,7 @@ func TestLogoutOfAnAPIKeySessionHasNothingToRevoke(t *testing.T) {
 func TestLoggingOutTwiceSendsNothing(t *testing.T) {
 	a := newAccount(t)
 	a.revocable(http.StatusOK)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -588,8 +601,8 @@ func TestLoggingOutTwiceSendsNothing(t *testing.T) {
 func TestLogoutWaitsForARunningRefresh(t *testing.T) {
 	a := newAccount(t)
 	a.revocable(http.StatusOK)
-	dir := t.TempDir()
-	s := openService(t, dir)
+	h := newHome(t)
+	s := openService(t, h)
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +634,7 @@ func TestLogoutWaitsForARunningRefresh(t *testing.T) {
 			t.Fatal("an operation did not end")
 		}
 	}
-	requireLoggedOut(t, s, dir)
+	requireLoggedOut(t, s, h)
 }
 
 func waitFor(t *testing.T, ch <-chan struct{}) {
@@ -637,7 +650,7 @@ func waitFor(t *testing.T, ch <-chan struct{}) {
 // use restarts the clock; a locked vault has nothing to lock.
 func TestLockIdle(t *testing.T) {
 	a := newAccount(t)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	clock := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return clock }
 	if err := s.Login(context.Background(), login(a)); err != nil {
@@ -666,7 +679,7 @@ func TestLockIdle(t *testing.T) {
 // refuses another; a locked vault verifies nothing.
 func TestVerifyPassword(t *testing.T) {
 	a := newAccount(t)
-	s := openService(t, t.TempDir())
+	s := openService(t, newHome(t))
 	if err := s.Login(context.Background(), login(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -971,13 +984,13 @@ func TestSendRefusals(t *testing.T) {
 }
 
 func TestASessionForAPlainHTTPServerStartsLoggedOut(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, sessionFile)
+	h := newHome(t)
+	path := filepath.Join(h.dir, sessionFile)
 	saved := `{"Server":"http://vault.example.com","Email":"ada@example.com","RefreshToken":"rt","ClientID":"desktop"}`
 	if err := os.WriteFile(path, []byte(saved), privateFileMode); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(dir, "test", func() {})
+	s, err := Open(h.dir, "test", h.keys, func() {})
 	if err != nil {
 		t.Fatalf("Open = %v, want a vault that starts", err)
 	}

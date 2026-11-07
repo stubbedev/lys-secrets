@@ -338,7 +338,7 @@ func (c *Client) token(ctx context.Context, op string, form url.Values, authEmai
 		return Token{}, e
 	case status == http.StatusBadRequest && strings.EqualFold(body.ErrorModel.Message, newDeviceMessage):
 		return Token{}, vault.ErrNewDeviceVerification
-	case status == http.StatusBadRequest && body.Error == "invalid_grant":
+	case status == http.StatusBadRequest && (body.Error == "invalid_grant" || body.Error == "invalid_client"):
 		return Token{}, fmt.Errorf("%w: %s", vault.ErrInvalidCredentials, firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription))
 	default:
 		return Token{}, apiError(op, status, firstNonEmpty(body.ErrorModel.Message, body.ErrorDescription, body.Error))

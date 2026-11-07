@@ -150,21 +150,28 @@ try costs one Argon2id derivation, with no other limit.
 
 **On disk**, the vault directory `$XDG_STATE_HOME/lys-secrets/bitwarden` is created
 mode 0700 and its files are 0600. It holds `device-id` and `session.json`, which holds the
-server, the email, the OAuth client id and the refresh token. Never the master
-password, a key or an item.
+server, the email and the OAuth client id. Nothing secret: never the refresh token,
+the API key, the master password, a key or an item.
 
-`session.json` is **not encrypted**. Whoever reads it can use the refresh token
-against the server, to get a token and your vault as the server stores it, still
-encrypted under your master password.
+**In the keyring**, the credential that renews the session is one item of the Secret
+Service's default collection (the `login` collection unless you pointed `default`
+elsewhere), with the schema `dev.stubbe.lys.Vault.Session` and the server and email as
+its attributes. It is the refresh token of a password login, or the API key's client
+secret of an API key login, which Bitwarden issues no refresh token for. It is
+encrypted at rest like every other secret there. Whoever reads it from an unlocked
+collection can use it against the server, to get a token and your vault as the server
+stores it, still encrypted under your master password. The vault reads it at the first
+unlock after a restart; a locked collection asks for its password first, through the
+same dialog as any other client's request.
 
-`Logout` deletes the file first, then asks the server to revoke the refresh token
-through OAuth's revocation endpoint (RFC 7009). The file goes whatever the server
-answers.
+`Logout` deletes the file and the keyring item first, then asks the server to revoke
+the refresh token through OAuth's revocation endpoint (RFC 7009). Both go whatever the
+server answers.
 
 **On Bitwarden's and Vaultwarden's servers, logging out does not end the session on
 the server.** They have no revocation endpoint today, so the refresh token stays
-valid until it expires or the account's sessions are deauthorized. A copy of
-`session.json` taken earlier keeps working until then. lys-secrets logs this once
+valid until it expires or the account's sessions are deauthorized. A copy of the
+refresh token read earlier keeps working until then. lys-secrets logs this once
 and answers `RevocationUnsupported`, which is the expected result on these servers,
 not a failure.
 
@@ -179,7 +186,8 @@ logs out every device on the account, so lys-secrets never does it for you.
 | Anything else, or no answer | `SessionNotRevoked`, saying why: revocation was tried and failed, so the token may still work |
 
 A session from a personal API key has no refresh token to revoke; its access token
-stops working when it expires.
+stops working when it expires, and the API key keeps working until you rotate it in
+Bitwarden's settings.
 
 **In memory**, unlike a collection's key, the vault's keys and decrypted items are
 on the Go heap, with no lock against swap. They are excluded from core dumps only by

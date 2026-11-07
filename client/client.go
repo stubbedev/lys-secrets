@@ -18,6 +18,7 @@ const (
 	servicePath     = dbus.ObjectPath("/org/freedesktop/secrets")
 	ifaceService    = "org.freedesktop.Secret.Service"
 	ifaceCollection = "org.freedesktop.Secret.Collection"
+	ifaceItem       = "org.freedesktop.Secret.Item"
 	ifaceSession    = "org.freedesktop.Secret.Session"
 	ifacePrompt     = "org.freedesktop.Secret.Prompt"
 	noPath          = dbus.ObjectPath("/")
@@ -134,6 +135,26 @@ func (c *Client) Store(ctx context.Context, label string, attrs map[string]strin
 	return nil
 }
 
+func (c *Client) Delete(ctx context.Context, attrs map[string]string) error {
+	var unlocked, locked []dbus.ObjectPath
+	if err := c.svc.CallWithContext(ctx, ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
+		return fmt.Errorf("secrets: search: %w", err)
+	}
+	for _, item := range append(unlocked, locked...) {
+		var prompt dbus.ObjectPath
+		if err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceItem+".Delete", 0).Store(&prompt); err != nil {
+			return fmt.Errorf("secrets: delete %s: %w", item, err)
+		}
+		if prompt == noPath {
+			continue
+		}
+		if _, err := c.prompt(ctx, prompt); err != nil {
+			return fmt.Errorf("secrets: delete %s: %w", item, err)
+		}
+	}
+	return nil
+}
+
 // prompt shows a provider prompt and waits for its Completed; a dismissed
 // prompt is ErrDismissed, and ctx ending dismisses it.
 func (c *Client) prompt(ctx context.Context, path dbus.ObjectPath) (dbus.Variant, error) {
@@ -165,4 +186,33 @@ func (c *Client) prompt(ctx context.Context, path dbus.ObjectPath) (dbus.Variant
 			return result, nil
 		}
 	}
+}
+
+type Keychain struct{ conn *dbus.Conn }
+
+func NewKeychain(conn *dbus.Conn) Keychain { return Keychain{conn: conn} }
+
+func (k Keychain) session(ctx context.Context, do func(*Client) error) error {
+	c, err := Open(ctx, k.conn)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return do(c)
+}
+
+func (k Keychain) Lookup(ctx context.Context, attrs map[string]string) (value []byte, found bool, err error) {
+	err = k.session(ctx, func(c *Client) error {
+		value, found, err = c.Lookup(ctx, attrs)
+		return err
+	})
+	return value, found, err
+}
+
+func (k Keychain) Store(ctx context.Context, label string, attrs map[string]string, value []byte) error {
+	return k.session(ctx, func(c *Client) error { return c.Store(ctx, label, attrs, value) })
+}
+
+func (k Keychain) Delete(ctx context.Context, attrs map[string]string) error {
+	return k.session(ctx, func(c *Client) error { return c.Delete(ctx, attrs) })
 }

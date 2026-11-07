@@ -1,6 +1,7 @@
 package bitwarden
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -21,14 +22,14 @@ import (
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
-// session is what survives a restart: the server, the account, the
-// refresh token and the client id it was issued to. No key material and
-// no vault data; the KDF comes from a fresh prelogin at every unlock.
+// session is what survives a restart on disk: the server, the account
+// and the client id it logged in as. Nothing secret: the credential that
+// renews it is in the keyring, and the KDF comes from a fresh prelogin at
+// every unlock.
 type session struct {
-	Server       vault.Server
-	Email        string
-	RefreshToken string
-	ClientID     string
+	Server   vault.Server
+	Email    string
+	ClientID string
 }
 
 const (
@@ -47,11 +48,13 @@ type Service struct {
 	now       func() time.Time
 	newClient func(vault.Server, Device) *Client
 	device    Device
+	keychain  Keychain
 
 	op sync.Mutex
 
 	mu        sync.Mutex
 	sess      *session
+	cred      *credential
 	access    string
 	accessExp time.Time
 	kr        *Keyring
@@ -81,9 +84,10 @@ const wakeCheckEvery = 30 * time.Second
 func wallClock() time.Time { return time.Now().Round(0) }
 
 // Open loads the session in dir (created 0700), registering a device id
-// on first use: an account there starts locked, none logged out.
-// changed runs after every status or vault change.
-func Open(dir, deviceName string, changed func()) (*Service, error) {
+// on first use: an account there starts locked, none logged out. Its
+// credential is read from keychain at the first unlock. changed runs
+// after every status or vault change.
+func Open(dir, deviceName string, keychain Keychain, changed func()) (*Service, error) {
 	if err := os.MkdirAll(dir, privateDirMode); err != nil {
 		return nil, fmt.Errorf("bitwarden: state directory %s: %w", dir, err)
 	}
@@ -91,8 +95,8 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery, logf: log.Printf}
-	sess, err := loadSession(filepath.Join(dir, sessionFile))
+	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, keychain: keychain, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery, logf: log.Printf}
+	sess, raw, err := loadSession(filepath.Join(dir, sessionFile))
 	if errors.Is(err, vault.ErrInsecureServer) {
 		return s.forgetInsecureSession(err)
 	}
@@ -100,6 +104,9 @@ func Open(dir, deviceName string, changed func()) (*Service, error) {
 		return nil, err
 	}
 	if sess != nil {
+		if err := s.rewriteSession(sess, raw); err != nil {
+			return nil, err
+		}
 		s.sess = sess
 		s.status = vault.Status{State: vault.StateLocked, Email: sess.Email}
 	}
@@ -143,23 +150,34 @@ func deviceID(path string) (string, error) {
 	return id, nil
 }
 
-func loadSession(path string) (*session, error) {
+func loadSession(path string) (*session, []byte, error) {
 	b, err := os.ReadFile(path) //nolint:gosec // the client's own state file
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("bitwarden: session %s: %w", path, err)
+		return nil, nil, fmt.Errorf("bitwarden: session %s: %w", path, err)
 	}
 	var s session
 	if err := json.Unmarshal(b, &s); err != nil {
-		return nil, fmt.Errorf("bitwarden: session %s: %w", path, err)
+		return nil, nil, fmt.Errorf("bitwarden: session %s: %w", path, err)
 	}
-	return &s, nil
+	return &s, b, nil
+}
+
+func (s *Service) rewriteSession(sess *session, raw []byte) error {
+	b, err := json.Marshal(sess)
+	if err != nil {
+		return fmt.Errorf("bitwarden: session: %w", err)
+	}
+	if bytes.Equal(b, raw) {
+		return nil
+	}
+	return s.saveSession(sess)
 }
 
 func (s *Service) saveSession(sess *session) error {
-	b, err := json.Marshal(sess) //nolint:gosec // the refresh token is the session; it is written 0600 and is all that persists
+	b, err := json.Marshal(sess)
 	if err != nil {
 		return fmt.Errorf("bitwarden: session: %w", err)
 	}
@@ -297,7 +315,10 @@ func (s *Service) Login(ctx context.Context, req vault.LoginRequest) error {
 	if err != nil {
 		return s.fail(err)
 	}
-	return s.open(ctx, c, &session{Server: req.Server, Email: req.Email, RefreshToken: tok.RefreshToken, ClientID: clientID}, tok, pre, mk)
+	if tok.RefreshToken == "" {
+		return s.fail(errors.New("bitwarden: login: the server issued no refresh token, so the session could not outlive this process"))
+	}
+	return s.open(ctx, c, &session{Server: req.Server, Email: req.Email, ClientID: clientID}, credential{RefreshToken: tok.RefreshToken}, tok, pre, mk)
 }
 
 // SendLoginEmail asks the server to email the second-factor code for a
@@ -327,9 +348,8 @@ func (s *Service) SendLoginEmail(ctx context.Context, req vault.LoginRequest) er
 
 // LoginAPIKey logs in with the personal API key and opens the vault
 // with the master password. The server issues no refresh token for it,
-// and locking drops the access token, so once the vault locks an unlock
-// logs out and it needs a new login. An open vault's sync does the same
-// once the access token expires.
+// so the keyring keeps the API key, and an unlock or a sync after the
+// access token expired logs in with it again, as Bitwarden's clients do.
 func (s *Service) LoginAPIKey(ctx context.Context, req vault.APIKeyRequest) error {
 	s.op.Lock()
 	defer s.op.Unlock()
@@ -347,12 +367,13 @@ func (s *Service) LoginAPIKey(ctx context.Context, req vault.APIKeyRequest) erro
 		return s.fail(err)
 	}
 	defer mk.wipe()
-	return s.open(ctx, c, &session{Server: req.Server, Email: req.Email, RefreshToken: tok.RefreshToken, ClientID: req.ClientID}, tok, pre, mk)
+	return s.open(ctx, c, &session{Server: req.Server, Email: req.Email, ClientID: req.ClientID}, credential{RefreshToken: tok.RefreshToken, ClientSecret: req.Secret}, tok, pre, mk)
 }
 
-// Unlock opens a locked vault with the master password: a fresh token,
-// a sync, the keys. A wrong password leaves it locked; a session that
-// can no longer refresh logs out with vault.ErrLoginRequired.
+// Unlock opens a locked vault with the master password: the credential
+// from the keyring after a restart, a fresh token, a sync, the keys. A
+// wrong password leaves it locked; a session that can no longer refresh,
+// or one the keyring does not keep, logs out with vault.ErrLoginRequired.
 func (s *Service) Unlock(ctx context.Context, password string) error {
 	s.op.Lock()
 	defer s.op.Unlock()
@@ -362,8 +383,12 @@ func (s *Service) Unlock(ctx context.Context, password string) error {
 	if sess == nil {
 		return s.fail(vault.ErrLoginRequired)
 	}
+	cred, err := s.credential(ctx, sess)
+	if err != nil {
+		return s.fail(err)
+	}
 	c := s.newClient(sess.Server, s.device)
-	tok, err := s.freshToken(ctx, c, sess)
+	tok, cred, err := s.freshToken(ctx, c, sess, cred)
 	if err != nil {
 		return s.fail(err)
 	}
@@ -379,12 +404,13 @@ func (s *Service) Unlock(ctx context.Context, password string) error {
 		return s.fail(err)
 	}
 	defer mk.wipe()
-	return s.open(ctx, c, sess, tok, pre, mk)
+	return s.open(ctx, c, sess, cred, tok, pre, mk)
 }
 
 // open syncs under tok, opens the keys with the master key, and makes
-// the vault current; the session is saved only once the vault opened.
-func (s *Service) open(ctx context.Context, c *Client, sess *session, tok Token, pre Prelogin, mk *masterKey) error {
+// the vault current; a new session or credential is kept only once the
+// vault opened.
+func (s *Service) open(ctx context.Context, c *Client, sess *session, cred credential, tok Token, pre Prelogin, mk *masterKey) error {
 	s.update(func() { s.status.Syncing = true })
 	sync, err := c.Sync(ctx, tok.AccessToken)
 	if err != nil {
@@ -395,9 +421,9 @@ func (s *Service) open(ctx context.Context, c *Client, sess *session, tok Token,
 		return s.fail(err)
 	}
 	if tok.RefreshToken != "" {
-		sess.RefreshToken = tok.RefreshToken
+		cred.RefreshToken = tok.RefreshToken
 	}
-	if err := s.saveSession(sess); err != nil {
+	if err := s.keepNew(ctx, sess, cred); err != nil {
 		kr.Wipe()
 		return s.fail(err)
 	}
@@ -405,7 +431,7 @@ func (s *Service) open(ctx context.Context, c *Client, sess *session, tok Token,
 	now := s.now()
 	s.update(func() {
 		s.wipeLocked()
-		s.sess, s.kr, s.vault = sess, kr, v
+		s.sess, s.cred, s.kr, s.vault = sess, &cred, kr, v
 		s.gate = passwordGate{kdf: pre.Kdf, salt: pre.Salt, userKey: sync.Profile.Key}
 		s.lastUse = now
 		s.access, s.accessExp = tok.AccessToken, tok.Expires
@@ -424,41 +450,63 @@ func orgKeys(p SyncProfile) map[string]string {
 	return m
 }
 
-// freshToken is the held access token while it lasts, else a refreshed
-// one; a revoked refresh token, or none (an API key login), logs out.
-func (s *Service) freshToken(ctx context.Context, c *Client, sess *session) (Token, error) {
+// freshToken is the held access token while it lasts, else a new one:
+// refreshed, or for an API key session logged in again with the key. A
+// credential the server refuses logs out. The server rotates the refresh
+// token, and the new one, the only one that works from here, is kept
+// whatever happens to this operation.
+func (s *Service) freshToken(ctx context.Context, c *Client, sess *session, cred credential) (Token, credential, error) {
 	s.mu.Lock()
 	access, exp := s.access, s.accessExp
 	s.mu.Unlock()
 	if access != "" && s.now().Add(refreshMargin).Before(exp) {
-		return Token{AccessToken: access, Expires: exp}, nil
+		return Token{AccessToken: access, Expires: exp}, cred, nil
 	}
-	if sess.RefreshToken == "" {
-		return Token{}, errors.Join(vault.ErrLoginRequired, s.logout())
+	var tok Token
+	var err error
+	if cred.RefreshToken != "" {
+		tok, err = c.Refresh(ctx, cred.RefreshToken, sess.ClientID, s.now())
+	} else {
+		tok, err = c.APIKeyLogin(ctx, sess.ClientID, cred.ClientSecret, s.now())
 	}
-	tok, err := c.Refresh(ctx, sess.RefreshToken, sess.ClientID, s.now())
 	if errors.Is(err, vault.ErrInvalidCredentials) {
-		return Token{}, errors.Join(fmt.Errorf("%w: %w", vault.ErrLoginRequired, err), s.logout())
+		return Token{}, credential{}, errors.Join(fmt.Errorf("%w: %w", vault.ErrLoginRequired, err), s.logout(ctx))
 	}
 	if err != nil {
-		return Token{}, err
+		return Token{}, credential{}, err
 	}
-	// The server rotates the refresh token: the new one is the only
-	// one that works from here, whatever happens to this operation.
-	next := *sess
-	next.RefreshToken = tok.RefreshToken
-	if next != *sess {
-		if err := s.saveSession(&next); err != nil {
-			return Token{}, err
+	next := cred
+	if tok.RefreshToken != "" {
+		next.RefreshToken = tok.RefreshToken
+	}
+	if next != cred {
+		if err := s.keep(ctx, sess, next); err != nil {
+			return Token{}, credential{}, err
 		}
 	}
 	s.mu.Lock()
 	if s.sess == sess {
-		s.sess = &next
+		s.cred = &next
 	}
 	s.access, s.accessExp = tok.AccessToken, tok.Expires
 	s.mu.Unlock()
-	return tok, nil
+	return tok, next, nil
+}
+
+func (s *Service) keepNew(ctx context.Context, sess *session, cred credential) error {
+	s.mu.Lock()
+	heldSess, heldCred := s.sess, s.cred
+	s.mu.Unlock()
+	if heldSess == sess && heldCred != nil && *heldCred == cred {
+		return nil
+	}
+	if err := s.keep(ctx, sess, cred); err != nil {
+		return err
+	}
+	if heldSess == sess {
+		return nil
+	}
+	return s.saveSession(sess)
 }
 
 // Sync refetches the open vault: new and changed items, organization
@@ -525,8 +573,12 @@ func (s *Service) authorize(ctx context.Context) (authorized, error) {
 	if kr == nil {
 		return authorized{}, vault.ErrLocked
 	}
+	cred, err := s.credential(ctx, sess)
+	if err != nil {
+		return authorized{}, err
+	}
 	c := s.newClient(sess.Server, s.device)
-	tok, err := s.freshToken(ctx, c, sess)
+	tok, _, err := s.freshToken(ctx, c, sess, cred)
 	if err != nil {
 		return authorized{}, err
 	}
@@ -741,15 +793,23 @@ func (s *Service) verifyPassword(password string) error {
 // keeps a session here. A server with no way to revoke is logged once and
 // returned as vault.ErrRevocationUnsupported, with no error in the status,
 // since that logout did all it can. An attempt that failed is
-// vault.ErrSessionNotRevoked, in the status as well. A session without a
+// vault.ErrSessionNotRevoked, in the status as well, and so is a keyring
+// that could not say which refresh token to revoke. A session without a
 // refresh token (an API key login) has nothing to revoke. It waits for a
 // running operation, which may rotate the token or save the session.
 func (s *Service) Logout(ctx context.Context) error {
 	s.op.Lock()
 	defer s.op.Unlock()
 	sess := s.session()
-	removeErr := s.logout()
-	revokeErr := s.revoke(ctx, sess)
+	if sess == nil {
+		return s.logout(ctx)
+	}
+	cred, _, lookupErr := s.heldCredential(ctx, sess)
+	removeErr := s.logout(ctx)
+	revokeErr := s.revoke(ctx, sess, cred)
+	if lookupErr != nil {
+		revokeErr = fmt.Errorf("%w: %w", vault.ErrSessionNotRevoked, lookupErr)
+	}
 	if errors.Is(revokeErr, vault.ErrRevocationUnsupported) {
 		s.revokeLog.Do(func() {
 			s.logf("bitwarden: %s cannot revoke a session, so the refresh token of each logout stays valid until it expires or the account's sessions are deauthorized: %v", sess.Server.Redacted(), revokeErr)
@@ -765,30 +825,37 @@ func (s *Service) Logout(ctx context.Context) error {
 	return nil
 }
 
-// revoke asks sess's server to revoke its refresh token, if it has one.
-func (s *Service) revoke(ctx context.Context, sess *session) error {
-	if sess == nil || sess.RefreshToken == "" {
+// revoke asks sess's server to revoke cred's refresh token, if it has one.
+func (s *Service) revoke(ctx context.Context, sess *session, cred credential) error {
+	if cred.RefreshToken == "" {
 		return nil
 	}
-	err := s.newClient(sess.Server, s.device).Revoke(ctx, sess.RefreshToken, sess.ClientID)
+	err := s.newClient(sess.Server, s.device).Revoke(ctx, cred.RefreshToken, sess.ClientID)
 	if err == nil || errors.Is(err, vault.ErrRevocationUnsupported) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", vault.ErrSessionNotRevoked, err)
 }
 
-// logout locks and forgets the session here. The caller holds op.
-func (s *Service) logout() error {
+// logout locks and forgets the session here and in the keyring. The
+// caller holds op.
+func (s *Service) logout(ctx context.Context) error {
+	var sess *session
 	s.update(func() {
 		s.wipeLocked()
-		s.sess = nil
+		sess, s.sess, s.cred = s.sess, nil, nil
 		s.status = vault.Status{State: vault.StateLoggedOut}
 	})
-	err := os.Remove(filepath.Join(s.dir, sessionFile))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("bitwarden: remove the session: %w", err)
+	var errs []error
+	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("bitwarden: remove the session: %w", err))
 	}
-	return nil
+	if sess != nil {
+		if err := s.keychain.Delete(ctx, keychainAttrs(sess)); err != nil {
+			errs = append(errs, fmt.Errorf("bitwarden: remove the session from the keyring: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // wipeLocked drops the keys, the plaintext and the access token; the
