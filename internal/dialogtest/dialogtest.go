@@ -73,6 +73,10 @@ func (daemon) Account(portaldialogs.Caller, string, portaldialogs.AccountInfo) (
 
 func (daemon) ConfirmWallpaper(portaldialogs.Caller, string) bool { return false }
 
+func (daemon) BindShortcuts(portaldialogs.Caller, portaldialogs.ShortcutsRequest) (bool, []portaldialogs.ShortcutTrigger) {
+	return false, nil
+}
+
 func (daemon) ChooseApplication(portaldialogs.Caller, portaldialogs.ChooserRequest) string {
 	return ""
 }
