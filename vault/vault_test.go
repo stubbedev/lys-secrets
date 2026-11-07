@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -727,6 +728,25 @@ func TestLogoutReportsASessionTheServerDidNotRevoke(t *testing.T) {
 		}
 		if err != nil && !strings.Contains(err.Error(), cause.Error()) {
 			t.Errorf("Logout = %v, want it to name the cause %v", err, cause)
+		}
+	}
+}
+
+// A watch whose connection closes under it, as a shared one does when its
+// owner shuts down first, ends instead of reading the closed channel.
+func TestWatchEndsWhenItsConnectionCloses(t *testing.T) {
+	_, c, conn, _ := serveOn(t, &fakeHost{status: Status{State: StateLocked}})
+	before := runtime.NumGoroutine()
+	if err := c.Watch(context.Background(), Watcher{Changed: func(Status) {}, SyncFailed: func(error) {}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); runtime.NumGoroutine() > before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			buf := make([]byte, 1<<16)
+			t.Fatalf("the watch outlived its connection: %d goroutines, %d before\n%s", runtime.NumGoroutine(), before, buf[:runtime.Stack(buf, true)])
 		}
 	}
 }

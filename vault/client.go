@@ -191,7 +191,10 @@ func (c *Client) Watch(ctx context.Context, w Watcher) error {
 					continue
 				}
 				w.Changed(st)
-			case sig := <-signals:
+			case sig, ok := <-signals:
+				if !ok {
+					return
+				}
 				if sig.Sender == owner && sig.Path == ServicePath {
 					dispatch(sig, w)
 				}
