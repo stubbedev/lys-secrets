@@ -27,6 +27,7 @@ in {
     ];
     # Shells started outside the systemd user environment find the agent too;
     # lys-secrets hands the same path to systemd and D-Bus activation.
+    programs.gnupg.agent.pinentryPackage = lib.mkIf cfg.pinentry.enable (import ./pinentry.nix {inherit pkgs cfg;});
     environment.extraInit = lib.mkIf cfg.sshAgent.enable ''
       export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/lys-secrets/ssh"
     '';

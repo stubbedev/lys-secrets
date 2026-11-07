@@ -23,6 +23,7 @@
             services.lys-secrets = {
               enable = true;
               sshAgent.enable = true;
+              pinentry.enable = true;
               vault = {
                 lockAfter = 5;
                 collectionFolder = "Desk top";
@@ -63,6 +64,7 @@
         # each naming the installed binary.
         package = pkgs.runCommand "lys-secrets-package" {} ''
           test -x ${pkg}/bin/lys-secrets
+          test "$(readlink ${pkg}/bin/pinentry-lys)" = lys-secrets
           grep -qx 'ExecStart=${pkg}/bin/lys-secrets' ${pkg}/lib/systemd/user/lys-secrets.service
           grep -qx 'Exec=${pkg}/bin/lys-secrets' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
           grep -qx 'SystemdService=lys-secrets.service' ${pkg}/share/dbus-1/services/org.freedesktop.secrets.service
@@ -78,6 +80,8 @@
         hm-module = expect "lys-secrets-hm-module" (
           home.home.sessionVariables.SSH_AUTH_SOCK
           == "\${XDG_RUNTIME_DIR}/lys-secrets/ssh"
+          && lib.getExe home.services.gpg-agent.pinentry.package
+          == "${home.services.gpg-agent.pinentry.package}/bin/pinentry-lys"
           &&
           home.xdg.dataFile."dbus-1/services/org.freedesktop.secrets.service".source
           == "${pkg}/share/dbus-1/services/org.freedesktop.secrets.service"
@@ -98,6 +102,7 @@
           && nixos.systemd.user.services.lys-secrets.serviceConfig.ExecStart
           == ["" "${pkg}/bin/lys-secrets --vault-lock-after=15m --vault-sync-interval=30m"]
           && !(lib.hasInfix "lys-secrets/ssh" nixos.environment.extraInit)
+          && (nixos.programs.gnupg.agent.pinentryPackage.name or "") != "pinentry-lys"
         );
       }
       // {

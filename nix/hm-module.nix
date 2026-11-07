@@ -13,6 +13,7 @@ in {
   config = lib.mkIf cfg.enable {
     # Shells started outside the systemd user environment find the agent too;
     # lys-secrets hands the same path to systemd and D-Bus activation.
+    services.gpg-agent.pinentry.package = lib.mkIf cfg.pinentry.enable (import ./pinentry.nix {inherit pkgs cfg;});
     home.sessionVariables = lib.mkIf cfg.sshAgent.enable {
       SSH_AUTH_SOCK = "\${XDG_RUNTIME_DIR}/lys-secrets/ssh";
     };

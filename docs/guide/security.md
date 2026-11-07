@@ -214,6 +214,13 @@ heap; every secret it derives stays in locked memory or on the stack. Where this
 - The passphrase you type crosses the session bus from the dialog host, as every
   password typed into a dialog does, and arrives as a Go string.
 
+## The GnuPG pinentry
+
+`pinentry-lys` marks itself undumpable, as the service does. The passphrase it hands
+gpg-agent is written in lines it clears afterwards, and is never logged. It crosses
+the session bus from the dialog host as every typed password does, and a remembered
+one crosses it again from the Secret Service, over a plain session, on each use.
+
 ## The Bitwarden vault
 
 **On disk**, the vault directory `$XDG_STATE_HOME/lys-secrets/bitwarden` is created

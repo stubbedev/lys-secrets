@@ -136,6 +136,33 @@ stops; the Nix modules also export it for login shells.
   again, or asks. Keys added with `ssh-add` stay until removed or expired.
 - Agent forwarding is the client's choice, as with any agent.
 
+## GnuPG passphrases
+
+`pinentry-lys` (also `lys-secrets pinentry`) is a pinentry for gpg-agent: it speaks
+the Assuan pinentry protocol on its standard input and output and asks through the
+desktop's own password dialog, so GnuPG's prompt looks like every other lys dialog.
+Point gpg-agent at it in `~/.gnupg/gpg-agent.conf`:
+
+```
+pinentry-program /usr/bin/pinentry-lys
+```
+
+then `gpgconf --kill gpg-agent`. The Nix modules' `pinentry.enable` does it for you.
+
+- When gpg-agent allows an external password cache, which it does for a key's
+  passphrase, the dialog has **Remember in the login keyring**, ticked. A remembered
+  passphrase is an item of the `login` collection with pinentry-gnome3's schema,
+  `org.gnupg.Passphrase`, and its `keygrip` attribute, so a passphrase gnome-keyring
+  kept is found as it is. While `login` is unlocked, gpg-agent then gets it with no
+  dialog, after a restart of the agent too. Unticking the box forgets it.
+- A passphrase gpg-agent says was wrong is asked again, with its reason, and never
+  read from the keyring.
+- A new passphrase is asked twice. Questions, such as taking a weak passphrase anyway,
+  show as a dialog with gpg-agent's buttons.
+- With no dialog host on the session bus, or no session bus at all (a text console or
+  an `ssh` session), it answers `GPG_ERR_NO_PIN_ENTRY` at once and exits, so gpg-agent
+  reports it has no pinentry instead of waiting.
+
 ## Clients it is checked against
 
 The test suite runs the real service on a private bus against `secret-tool`,

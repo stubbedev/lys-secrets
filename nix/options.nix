@@ -60,6 +60,18 @@ self: {
     '';
   };
 
+  pinentry.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = ''
+      Make `pinentry-lys` GnuPG's pinentry: gpg-agent asks for passphrases
+      through the desktop's dialog, which can remember one in the login
+      collection under pinentry-gnome3's `org.gnupg.Passphrase` schema. Sets
+      home-manager's `services.gpg-agent.pinentry.package`, or NixOS'
+      `programs.gnupg.agent.pinentryPackage`; enabling the agent stays yours.
+    '';
+  };
+
   vault = {
     lockAfter = lib.mkOption {
       type = lib.types.ints.unsigned;

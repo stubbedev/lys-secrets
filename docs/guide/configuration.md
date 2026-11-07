@@ -16,6 +16,10 @@ the Nix modules write those flags for you.
 | `--vault-sync-interval D` | `30m` | Sync the open vault this often; `0` syncs only on unlock and when asked |
 | `--vault-collection-folder NAME` | empty | Show the logins of this vault folder as the read-only `bitwarden` collection; empty shows none |
 
+`lys-secrets pinentry`, or `pinentry-lys`, a link to the binary installed beside it,
+is GnuPG's pinentry rather than the service; see [GnuPG
+passphrases](/guide/how-it-works#gnupg-passphrases).
+
 Durations use Go's syntax, such as `90s` or `1h30m`. A negative one is refused at
 start. The idle locks and the vault's sync interval act on time and count time the
 machine was suspended, acting within 30 seconds of it waking.
@@ -62,6 +66,7 @@ Both the NixOS and the home-manager module take these, under
 | `collections.lockOnScreenLock` | `false` | `--collection-lock-on-screen-lock` |
 | `collections.confirmForeignReads` | `false` | `--confirm-foreign-reads` |
 | `sshAgent.enable` | `false` | `--ssh-agent`, and `SSH_AUTH_SOCK` for login shells |
+| `pinentry.enable` | `false` | No flag: makes `pinentry-lys` gpg-agent's pinentry (home-manager's `services.gpg-agent.pinentry.package`, NixOS' `programs.gnupg.agent.pinentryPackage`) |
 | `vault.lockAfter` | `15` (minutes) | `--vault-lock-after` |
 | `vault.syncInterval` | `30` (minutes) | `--vault-sync-interval` |
 | `vault.collectionFolder` | `""` | `--vault-collection-folder` |

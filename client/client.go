@@ -60,6 +60,16 @@ func (c *Client) Close() {
 // unlocking its collection through a prompt when it is locked. found is
 // false when no item matches.
 func (c *Client) Lookup(ctx context.Context, attrs map[string]string) (value []byte, found bool, err error) {
+	return c.lookup(ctx, attrs, true)
+}
+
+// Find finds the first unlocked item holding attrs and returns its secret,
+// asking nothing; found is false when no unlocked item matches.
+func (c *Client) Find(ctx context.Context, attrs map[string]string) (value []byte, found bool, err error) {
+	return c.lookup(ctx, attrs, false)
+}
+
+func (c *Client) lookup(ctx context.Context, attrs map[string]string, unlock bool) (value []byte, found bool, err error) {
 	var unlocked, locked []dbus.ObjectPath
 	if err := c.svc.CallWithContext(ctx, ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
 		return nil, false, fmt.Errorf("secrets: search: %w", err)
@@ -68,7 +78,7 @@ func (c *Client) Lookup(ctx context.Context, attrs map[string]string) (value []b
 	switch {
 	case len(unlocked) > 0:
 		item = unlocked[0]
-	case len(locked) > 0:
+	case unlock && len(locked) > 0:
 		item = locked[0]
 		var done []dbus.ObjectPath
 		var prompt dbus.ObjectPath
@@ -118,6 +128,21 @@ func (c *Client) Store(ctx context.Context, label string, attrs map[string]strin
 			}
 		}
 	}
+	return c.storeIn(ctx, coll, label, attrs, value)
+}
+
+// LoginCollection is the collection the login password opens, under
+// lys-secrets and gnome-keyring alike.
+const LoginCollection = dbus.ObjectPath("/org/freedesktop/secrets/collection/login")
+
+// StoreLogin saves value under attrs in the login collection, replacing an
+// item with the same attributes, unlocking it through a prompt when it is
+// locked.
+func (c *Client) StoreLogin(ctx context.Context, label string, attrs map[string]string, value []byte) error {
+	return c.storeIn(ctx, LoginCollection, label, attrs, value)
+}
+
+func (c *Client) storeIn(ctx context.Context, coll dbus.ObjectPath, label string, attrs map[string]string, value []byte) error {
 	props := map[string]dbus.Variant{
 		"org.freedesktop.Secret.Item.Label":      dbus.MakeVariant(label),
 		"org.freedesktop.Secret.Item.Attributes": dbus.MakeVariant(attrs),

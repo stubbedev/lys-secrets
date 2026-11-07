@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/internal/dialogtest"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/pinentry"
 	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/internal/sshagent"
 )
@@ -89,5 +91,31 @@ func TestKeyPassphraseOffersToRememberIt(t *testing.T) {
 	r := asked[0]
 	if !r.Retry || !strings.Contains(r.Body, "u@host") || !strings.Contains(r.Body, "SHA256:abc") || len(r.Choices) != 1 || r.Choices[0].Label != "Remember in the login keyring" || r.Choices[0].Initial != "true" {
 		t.Errorf("the dialog showed %+v", r)
+	}
+}
+
+func TestGetPinShowsGpgAgentsDialog(t *testing.T) {
+	bus := dbustest.Session(t)
+	d := New(bus.Conn(t))
+	if _, _, _, err := d.GetPin(t.Context(), pinentry.Request{}); !errors.Is(err, pinentry.ErrNoDialogHost) {
+		t.Fatalf("GetPin with no dialog host = %v, want ErrNoDialogHost", err)
+	}
+	host := &dialogtest.Host{Password: func(r portaldialogs.PasswordRequest) (bool, string, []portaldialogs.Selection) {
+		return true, "pin", []portaldialogs.Selection{{ID: "remember", Value: "false"}}
+	}}
+	dialogtest.Serve(t, bus.Conn(t), host)
+	pin, remember, ok, err := d.GetPin(t.Context(), pinentry.Request{
+		Description: "Unlock the key", Error: "Bad Passphrase (try 2 of 3)", OK: "_OK", Cancel: "_Cancel", Repeat: true, Remember: true,
+	})
+	if err != nil || !ok || remember || string(pin) != "pin" {
+		t.Fatalf("GetPin = %q, %v, %v, %v", pin, remember, ok, err)
+	}
+	asked, _ := host.Asked()
+	r := asked[0]
+	if r.Body != "Bad Passphrase (try 2 of 3)\n\nUnlock the key" || !r.Retry || !r.Confirm || r.AcceptLabel != "OK" || r.CancelLabel != "Cancel" || len(r.Choices) != 1 {
+		t.Errorf("the dialog showed %+v", r)
+	}
+	if got := mnemonicFree("Save in __password manager_"); got != "Save in _password manager" {
+		t.Errorf("mnemonicFree = %q", got)
 	}
 }

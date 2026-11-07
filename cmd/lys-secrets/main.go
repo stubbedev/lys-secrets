@@ -26,6 +26,12 @@
 // $XDG_RUNTIME_DIR/lys-secrets/ssh, for the keys of ~/.ssh and those added
 // with ssh-add, remembering key passphrases in the login collection, and
 // hands that socket to the session as SSH_AUTH_SOCK.
+//
+//	lys-secrets pinentry   (or pinentry-lys, a link to lys-secrets)
+//
+// is GnuPG's pinentry (pinentry-program in gpg-agent.conf): it asks for
+// passphrases through the desktop's dialog and can remember them in the
+// login collection, under pinentry-gnome3's org.gnupg.Passphrase schema.
 package main
 
 import (
@@ -73,6 +79,13 @@ type options struct {
 }
 
 func main() {
+	if filepath.Base(os.Args[0]) == "pinentry-lys" || len(os.Args) > 1 && os.Args[1] == "pinentry" {
+		if err := runPinentry(); err != nil {
+			fmt.Fprintln(os.Stderr, "lys-secrets pinentry:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	var o options
 	flag.IntVar(&o.unlockFD, "unlock-fd", -1, "read the login password from this inherited descriptor and unlock the login collection with it")
 	flag.DurationVar(&o.collectionLockAfter, "collection-lock-after", 0, "lock a collection after no secret was read from it and nothing in it changed for this long; 0 keeps it open until locked")

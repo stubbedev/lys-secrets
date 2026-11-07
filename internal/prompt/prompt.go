@@ -17,18 +17,23 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/pinentry"
 	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/internal/sshagent"
 )
 
-// Dialogs is a service.Prompter over the shell's dialogs.
+// Dialogs is a service.Prompter, an sshagent.Prompter and a pinentry.UI over
+// the shell's dialogs.
 type Dialogs struct {
+	conn   *dbus.Conn
 	client *portaldialogs.Client
 	seq    atomic.Uint64
 }
 
 // New prompts through the dialog host on conn.
-func New(conn *dbus.Conn) *Dialogs { return &Dialogs{client: portaldialogs.NewClient(conn)} }
+func New(conn *dbus.Conn) *Dialogs {
+	return &Dialogs{conn: conn, client: portaldialogs.NewClient(conn)}
+}
 
 // caller is a new prompt's caller, taken down with ctx.
 func (d *Dialogs) caller(ctx context.Context) (portaldialogs.Caller, func()) {
@@ -189,4 +194,94 @@ func programName(p keyring.Owner) string {
 		return app
 	}
 	return filepath.Base(string(p))
+}
+
+// hostTimeout bounds asking the bus whether a dialog host is there.
+const hostTimeout = time.Second
+
+// present is pinentry.ErrNoDialogHost unless a dialog host owns its name.
+// It asks the bus who owns the name rather than calling it, which could wait
+// on a host D-Bus would try to start.
+func (d *Dialogs) present(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, hostTimeout)
+	defer cancel()
+	var has bool
+	if err := d.conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.NameHasOwner", 0, portaldialogs.ServiceName).Store(&has); err != nil {
+		return fmt.Errorf("%w: ask the bus for %s: %w", pinentry.ErrNoDialogHost, portaldialogs.ServiceName, err)
+	}
+	if !has {
+		return pinentry.ErrNoDialogHost
+	}
+	return nil
+}
+
+// GetPin asks for a GnuPG passphrase as gpg-agent set the dialog up.
+func (d *Dialogs) GetPin(ctx context.Context, r pinentry.Request) ([]byte, bool, bool, error) {
+	if err := d.present(ctx); err != nil {
+		return nil, false, false, err
+	}
+	req := portaldialogs.PasswordRequest{
+		Title:       cmp.Or(r.Title, "GnuPG passphrase"),
+		Body:        strings.Join(nonEmpty(r.Error, r.Description), "\n\n"),
+		Confirm:     r.Repeat,
+		Retry:       r.Error != "",
+		AcceptLabel: mnemonicFree(r.OK),
+		CancelLabel: mnemonicFree(r.Cancel),
+	}
+	if r.Remember {
+		req.Choices = []portaldialogs.Choice{rememberChoice}
+	}
+	pin, picked, ok, err := d.askChoosing(ctx, req)
+	return pin, remembered(picked), ok, err
+}
+
+// Confirm asks gpg-agent's question; a message only has its OK.
+func (d *Dialogs) Confirm(ctx context.Context, r pinentry.Request, oneButton bool) (bool, error) {
+	if err := d.present(ctx); err != nil {
+		return false, err
+	}
+	caller, done := d.caller(ctx)
+	defer done()
+	deny := cmp.Or(mnemonicFree(r.Cancel), "Cancel")
+	if oneButton {
+		deny = "Close"
+	}
+	granted, _, err := d.client.Access(ctx, caller, portaldialogs.AccessRequest{
+		Title:      cmp.Or(r.Title, "GnuPG"),
+		Body:       strings.Join(nonEmpty(r.Error, r.Description), "\n\n"),
+		GrantLabel: cmp.Or(mnemonicFree(r.OK), "OK"),
+		DenyLabel:  deny,
+		Icon:       "dialog-password",
+	})
+	if err != nil {
+		return false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
+	}
+	return granted, nil
+}
+
+func nonEmpty(parts ...string) []string {
+	out := parts[:0:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mnemonicFree drops GnuPG's mnemonic underscores from a label: "_OK" is
+// "OK", and "__" an underscore.
+func mnemonicFree(label string) string {
+	var b strings.Builder
+	for i := 0; i < len(label); i++ {
+		if label[i] == '_' {
+			if i+1 < len(label) && label[i+1] == '_' {
+				b.WriteByte('_')
+				i++
+			}
+			continue
+		}
+		b.WriteByte(label[i])
+	}
+	return b.String()
 }

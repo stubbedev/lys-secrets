@@ -16,6 +16,7 @@ override_dh_installsystemduser:
 override_dh_auto_install:
 	install -d debian/lys-secrets/usr/bin
 	install -m 0755 lys-secrets debian/lys-secrets/usr/bin/
+	ln -s lys-secrets debian/lys-secrets/usr/bin/pinentry-lys
 
 	install -d debian/lys-secrets/usr/lib/systemd/user
 	install -m 0644 lys-secrets.service debian/lys-secrets/usr/lib/systemd/user/

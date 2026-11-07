@@ -38,7 +38,10 @@
       # The user unit and the D-Bus activation files, for the modules to
       # wire up. Installing the package alone activates neither, since
       # gnome-keyring's activation file may claim the same name.
+      # pinentry-lys runs the binary as GnuPG's pinentry, for a
+      # pinentry-program line, which takes no arguments.
       postInstall = ''
+        ln -s lys-secrets $out/bin/pinentry-lys
         install -d $out/lib/systemd/user $out/share/dbus-1/services
         substitute resources/lys-secrets.service $out/lib/systemd/user/lys-secrets.service \
           --replace-fail /usr/bin/lys-secrets "$out/bin/lys-secrets"
