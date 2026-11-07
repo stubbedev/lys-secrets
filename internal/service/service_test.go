@@ -19,6 +19,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 var testKDF = keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}
@@ -445,7 +446,7 @@ func TestFailedStartLeavesNothingExported(t *testing.T) {
 		t.Fatalf("Start = %v, want dbusx.ErrNameTaken", err)
 	}
 	client := f.bus.Conn(t)
-	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
+	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", transport.AlgPlain, dbus.MakeVariant(""))
 	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
 	requireGone(t, client, conn, defaultAliasPath, ifaceCollection+".SearchItems", map[string]string{})
 	requireGone(t, client, conn, collectionPath("nothing"), ifaceCollection+".SearchItems", map[string]string{})
@@ -474,7 +475,7 @@ func TestCloseUnexportsTheService(t *testing.T) {
 	}
 	f.svc.Close()
 	conn := f.svc.conn
-	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", algPlain, dbus.MakeVariant(""))
+	requireGone(t, client, conn, rootPath, ifaceService+".OpenSession", transport.AlgPlain, dbus.MakeVariant(""))
 	requireGone(t, client, conn, collectionPath(LoginID), "org.freedesktop.DBus.Properties.Get", ifaceCollection, "Label")
 	requireGone(t, client, conn, defaultAliasPath, ifaceCollection+".SearchItems", map[string]string{})
 	requireGone(t, client, conn, sess, ifaceSession+".Close")

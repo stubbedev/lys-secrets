@@ -235,7 +235,7 @@ func (s *Service) vaultSecretLocked(p dbus.ObjectPath, sessPath dbus.ObjectPath,
 		return Secret{}, dbusx.Failed(err.Error())
 	}
 	defer clear(value)
-	params, enc, err := sess.t.encode(value)
+	params, enc, err := sess.t.Encode(value)
 	if err != nil {
 		return Secret{}, dbusx.Failed("encode the secret: " + err.Error())
 	}

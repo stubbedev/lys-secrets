@@ -13,6 +13,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 // serviceMethods is org.freedesktop.Secret.Service.
@@ -20,12 +21,12 @@ type serviceMethods struct{ s *Service }
 
 // OpenSession negotiates the transport for the caller's secrets.
 func (m serviceMethods) OpenSession(sender dbus.Sender, algorithm string, input dbus.Variant) (dbus.Variant, dbus.ObjectPath, *dbus.Error) {
-	var t transport
+	var t transport.Transport
 	output := dbus.MakeVariant("")
 	switch algorithm {
-	case algPlain:
-		t = plainTransport{}
-	case algDH:
+	case transport.AlgPlain:
+		t = transport.Plain{}
+	case transport.AlgDH:
 		peer, ok := input.Value().([]byte)
 		if !ok {
 			return dbus.Variant{}, "", dbusx.InvalidArgs("the DH input is the client's public key, ay")
@@ -497,7 +498,7 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 		s.mu.Unlock()
 		return "", "", derr
 	}
-	value, err := sess.t.decode(secret.Parameters, secret.Value)
+	value, err := sess.t.Decode(secret.Parameters, secret.Value)
 	if err != nil {
 		s.mu.Unlock()
 		return "", "", dbusx.InvalidArgs("decode the secret: " + err.Error())
@@ -633,7 +634,7 @@ func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 		s.mu.Unlock()
 		return noSuchObject(itemPath(m.cid, m.id))
 	}
-	value, err := sess.t.decode(secret.Parameters, secret.Value)
+	value, err := sess.t.Decode(secret.Parameters, secret.Value)
 	s.mu.Unlock()
 	if err != nil {
 		return dbusx.InvalidArgs("decode the secret: " + err.Error())

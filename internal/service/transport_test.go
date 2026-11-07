@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,23 +13,25 @@ import (
 	mrand "math/rand/v2"
 	"strings"
 	"testing"
+
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 // clientDH is the client half, written from the spec the way
 // python-secretstorage does it, independent of negotiateDH.
 func clientDH(t *testing.T) (priv *big.Int, public []byte) {
 	t.Helper()
-	priv, err := rand.Int(rand.Reader, dhPrime)
+	priv, err := rand.Int(rand.Reader, transport.Prime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return priv, new(big.Int).Exp(big.NewInt(2), priv, dhPrime).Bytes()
+	return priv, new(big.Int).Exp(big.NewInt(2), priv, transport.Prime).Bytes()
 }
 
 func clientKey(t *testing.T, priv *big.Int, server []byte) []byte {
 	t.Helper()
-	shared := new(big.Int).Exp(new(big.Int).SetBytes(server), priv, dhPrime).Bytes()
-	padded := append(make([]byte, dhPrimeLen-len(shared)), shared...)
+	shared := new(big.Int).Exp(new(big.Int).SetBytes(server), priv, transport.Prime).Bytes()
+	padded := append(make([]byte, transport.PrimeLen-len(shared)), shared...)
 	key, err := hkdf.Key(sha256.New, padded, make([]byte, sha256.Size), "", aes.BlockSize)
 	if err != nil {
 		t.Fatal(err)
@@ -42,28 +45,28 @@ func TestDHAgreesWithAnIndependentClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := aesTransport{key: clientKey(t, priv, server)}
+	client := clientKey(t, priv, server)
 	for _, secret := range []string{"", "x", "exactly sixteen!", strings.Repeat("long secret ", 20)} {
-		params, value, err := tr.encode([]byte(secret))
+		params, value, err := tr.Encode([]byte(secret))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(params) != aes.BlockSize || len(value)%aes.BlockSize != 0 || len(value) <= len(secret)-aes.BlockSize {
 			t.Fatalf("%q: params %d value %d bytes", secret, len(params), len(value))
 		}
-		got, err := client.decode(params, value)
+		got, err := cbcDecode(client, params, value)
 		if err != nil || string(got) != secret {
 			t.Errorf("client decodes %q, %v; want %q", got, err, secret)
 		}
-		params, value, _ = client.encode([]byte(secret))
-		if back, err := tr.decode(params, value); err != nil || string(back) != secret {
+		params, value, _ = cbcEncode(client, []byte(secret))
+		if back, err := tr.Decode(params, value); err != nil || string(back) != secret {
 			t.Errorf("server decodes %q, %v; want %q", back, err, secret)
 		}
 	}
 }
 
 func TestDHRejectsBadInput(t *testing.T) {
-	for _, peer := range [][]byte{{}, {1}, new(big.Int).Sub(dhPrime, big.NewInt(1)).Bytes(), dhPrime.Bytes()} {
+	for _, peer := range [][]byte{{}, {1}, new(big.Int).Sub(transport.Prime, big.NewInt(1)).Bytes(), transport.Prime.Bytes()} {
 		if _, _, err := negotiateDH(peer, rand.Reader); err == nil {
 			t.Errorf("public key %x accepted", peer)
 		}
@@ -78,11 +81,11 @@ func TestDHRejectsBadInput(t *testing.T) {
 		{"empty", make([]byte, 16), nil},
 		{"partial block", make([]byte, 16), make([]byte, 20)},
 	} {
-		if _, err := tr.decode(tc.params, tc.value); err == nil {
+		if _, err := tr.Decode(tc.params, tc.value); err == nil {
 			t.Errorf("%s accepted", tc.name)
 		}
 	}
-	if _, err := (plainTransport{}).decode([]byte{1}, []byte("x")); err == nil {
+	if _, err := (transport.Plain{}).Decode([]byte{1}, []byte("x")); err == nil {
 		t.Error("plain secret with parameters accepted")
 	}
 }
@@ -91,7 +94,7 @@ func TestDHRejectsBadInput(t *testing.T) {
 // the shared secret without its leading zero bytes.
 func unpaddedKey(t *testing.T, priv *big.Int, server []byte) []byte {
 	t.Helper()
-	shared := new(big.Int).Exp(new(big.Int).SetBytes(server), priv, dhPrime).Bytes()
+	shared := new(big.Int).Exp(new(big.Int).SetBytes(server), priv, transport.Prime).Bytes()
 	key, err := hkdf.Key(sha256.New, shared, nil, "", aes.BlockSize)
 	if err != nil {
 		t.Fatal(err)
@@ -105,15 +108,15 @@ func unpaddedKey(t *testing.T, priv *big.Int, server []byte) []byte {
 // key for this client; without the redraw the two derivations differ.
 func TestDHSecretIsTheSameBytesPaddedOrNot(t *testing.T) {
 	client := new(big.Int).SetBytes(bytes.Repeat([]byte{0x5a}, 100))
-	public := new(big.Int).Exp(big.NewInt(2), client, dhPrime).Bytes()
-	pMinus1 := new(big.Int).Sub(dhPrime, big.NewInt(1))
+	public := new(big.Int).Exp(big.NewInt(2), client, transport.Prime).Bytes()
+	pMinus1 := new(big.Int).Sub(transport.Prime, big.NewInt(1))
 	firstDrawShort := func(seed uint64) bool {
 		priv, err := rand.Int(seeded(seed), pMinus1)
 		if err != nil {
 			t.Fatal(err)
 		}
 		priv.Add(priv, big.NewInt(1))
-		return new(big.Int).Exp(new(big.Int).SetBytes(public), priv, dhPrime).BitLen() <= 8*(dhPrimeLen-1)
+		return new(big.Int).Exp(new(big.Int).SetBytes(public), priv, transport.Prime).BitLen() <= 8*(transport.PrimeLen-1)
 	}
 	seed := uint64(0)
 	for !firstDrawShort(seed) {
@@ -124,11 +127,11 @@ func TestDHSecretIsTheSameBytesPaddedOrNot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, key := range map[string][]byte{"padded": clientKey(t, client, server), "stripped": unpaddedKey(t, client, server)} {
-		params, value, err := tr.encode([]byte("s3cret"))
+		params, value, err := tr.Encode([]byte("s3cret"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := (aesTransport{key: key}).decode(params, value); err != nil || string(got) != "s3cret" {
+		if got, err := cbcDecode(key, params, value); err != nil || string(got) != "s3cret" {
 			t.Errorf("a %s-secret client decodes %q, %v", name, got, err)
 		}
 	}
@@ -140,10 +143,34 @@ func seeded(seed uint64) io.Reader {
 	return mrand.NewChaCha8(key)
 }
 
-func FuzzAESDecode(f *testing.F) {
-	key := make([]byte, aes.BlockSize)
-	f.Add(make([]byte, 16), make([]byte, 32))
-	f.Fuzz(func(t *testing.T, params, value []byte) {
-		_, _ = aesTransport{key: key}.decode(params, value)
-	})
+func cbcDecode(key, iv, value []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(iv) != aes.BlockSize || len(value) == 0 || len(value)%aes.BlockSize != 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	buf := bytes.Clone(value)
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(buf, buf)
+	pad := int(buf[len(buf)-1])
+	if pad == 0 || pad > aes.BlockSize {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return buf[:len(buf)-pad], nil
+}
+
+func cbcEncode(key, secret []byte) ([]byte, []byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	iv := make([]byte, aes.BlockSize)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, nil, err
+	}
+	pad := aes.BlockSize - len(secret)%aes.BlockSize
+	buf := append(bytes.Clone(secret), bytes.Repeat([]byte{byte(pad)}, pad)...)
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(buf, buf)
+	return iv, buf, nil
 }

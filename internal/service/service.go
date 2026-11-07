@@ -29,6 +29,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 // D-Bus names of the API.
@@ -185,7 +186,7 @@ func (c *collection) unexport() {
 
 type session struct {
 	owner string
-	t     transport
+	t     transport.Transport
 	off   func()
 }
 
@@ -939,7 +940,7 @@ func (s *Service) secretLocked(c *collection, id uint32, sessPath dbus.ObjectPat
 	defer clear(value)
 	s.usedLocked(c)
 	it, _ := c.kr.Item(id)
-	params, enc, err := sess.t.encode(value)
+	params, enc, err := sess.t.Encode(value)
 	if err != nil {
 		return Secret{}, dbusx.Failed("encode the secret: " + err.Error())
 	}

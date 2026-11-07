@@ -17,6 +17,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/transport"
 )
 
 const loginPassword = "login-pw"
@@ -41,7 +42,7 @@ func openSession(t *testing.T, conn *dbus.Conn) dbus.ObjectPath {
 	t.Helper()
 	var out dbus.Variant
 	var sess dbus.ObjectPath
-	if err := conn.Object(BusName, rootPath).Call(ifaceService+".OpenSession", 0, algPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
+	if err := conn.Object(BusName, rootPath).Call(ifaceService+".OpenSession", 0, transport.AlgPlain, dbus.MakeVariant("")).Store(&out, &sess); err != nil {
 		t.Fatal(err)
 	}
 	return sess
