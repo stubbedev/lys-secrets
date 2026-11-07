@@ -14,6 +14,9 @@
 //	body      XChaCha20-Poly1305 nonce, ciphertext and tag of the
 //	          JSON body, with everything above as associated data
 //
+// Each item's owners, the programs that stored or changed it or that the
+// user allowed to read it, are in the body.
+//
 // The attribute hashes let a locked collection answer a search with the
 // matching items, so a client knows to ask for an unlock, as
 // gnome-keyring's format does; everything else is in the body. While
@@ -83,6 +86,10 @@ func hashAttr(name, value string) attrHash {
 	return attrHash(h.Sum(nil))
 }
 
+// Owner is a program an item belongs to: its executable's path, or
+// "flatpak:" and the app id of a Flatpak app.
+type Owner string
+
 // Item is one stored secret's metadata; the secret itself is read with
 // Collection.Secret.
 type Item struct {
@@ -90,9 +97,16 @@ type Item struct {
 	Label       string
 	Attributes  map[string]string
 	ContentType string
-	Created     time.Time
-	Modified    time.Time
+	// Owners are the programs that may read the item without asking, in
+	// the order they became owners; none for an item from before owners
+	// were kept.
+	Owners   []Owner
+	Created  time.Time
+	Modified time.Time
 }
+
+// Owned reports whether o is one of the item's owners.
+func (it Item) Owned(o Owner) bool { return slices.Contains(it.Owners, o) }
 
 type entry struct {
 	Item
@@ -222,6 +236,7 @@ type itemJSON struct {
 	Label       string            `json:"label"`
 	Attributes  map[string]string `json:"attributes"`
 	ContentType string            `json:"content_type"`
+	Owners      []Owner           `json:"owners,omitempty"`
 	Secret      []byte            `json:"secret"`
 	Created     int64             `json:"created"`
 	Modified    int64             `json:"modified"`
@@ -302,7 +317,7 @@ func (o *Opening) read(k *key) (*Opened, error) {
 	items := make([]openedItem, len(body.Items))
 	for i, it := range body.Items {
 		items[i] = openedItem{
-			ID: it.ID, Label: it.Label, Attributes: it.Attributes, ContentType: it.ContentType,
+			ID: it.ID, Label: it.Label, Attributes: it.Attributes, ContentType: it.ContentType, Owners: it.Owners,
 			Created: time.Unix(it.Created, 0).UTC(), Modified: time.Unix(it.Modified, 0).UTC(),
 			sealed: k.seal(it.Secret, itemAD(it.ID)),
 		}
@@ -419,7 +434,7 @@ func (c *Collection) sealBody() ([]byte, error) {
 			return nil, fmt.Errorf("keyring: item %d's secret does not open: %w", id, err)
 		}
 		body.Items = append(body.Items, itemJSON{
-			ID: id, Label: e.Label, Attributes: e.Attributes, ContentType: e.ContentType, Secret: secret,
+			ID: id, Label: e.Label, Attributes: e.Attributes, ContentType: e.ContentType, Owners: e.Owners, Secret: secret,
 			Created: e.Created.Unix(), Modified: e.Modified.Unix(),
 		})
 	}
@@ -512,6 +527,7 @@ func (c *Collection) Clone() *Collection {
 	for id, e := range c.entries {
 		copied := *e
 		copied.Attributes = maps.Clone(e.Attributes)
+		copied.Owners = slices.Clone(e.Owners)
 		copied.hashes = slices.Clone(e.hashes)
 		next.entries[id] = &copied
 	}
@@ -604,6 +620,7 @@ func (c *Collection) Item(id uint32) (Item, error) {
 	}
 	it := e.Item
 	it.Attributes = maps.Clone(e.Attributes)
+	it.Owners = slices.Clone(e.Owners)
 	return it, nil
 }
 
@@ -623,9 +640,10 @@ func (c *Collection) Secret(id uint32) ([]byte, error) {
 	return secret, nil
 }
 
-// CreateItem stores a secret. With replace, an item with exactly the
-// same attributes is updated in place instead; created reports which.
-func (c *Collection) CreateItem(label string, attrs map[string]string, secret []byte, contentType string, replace bool, now time.Time) (id uint32, created bool, err error) {
+// CreateItem stores a secret, owned by owner unless that is "". With
+// replace, an item with exactly the same attributes is updated in place
+// instead, and owner joins its owners; created reports which.
+func (c *Collection) CreateItem(label string, attrs map[string]string, secret []byte, contentType string, owner Owner, replace bool, now time.Time) (id uint32, created bool, err error) {
 	if c.key == nil {
 		return 0, false, ErrLocked
 	}
@@ -635,6 +653,7 @@ func (c *Collection) CreateItem(label string, attrs map[string]string, secret []
 			if e := c.entries[cand]; maps.Equal(e.Attributes, attrs) {
 				e.Label, e.ContentType, e.Modified = label, contentType, now
 				e.sealed = c.key.seal(secret, itemAD(cand))
+				e.own(owner)
 				c.mod = now
 				return cand, false, nil
 			}
@@ -645,18 +664,20 @@ func (c *Collection) CreateItem(label string, attrs map[string]string, secret []
 	e := &entry{ID: id, Created: now, Modified: now}
 	c.entries[id] = e
 	e.Label, e.ContentType = label, contentType
+	e.own(owner)
 	c.setAttributes(e, attrs)
 	e.sealed = c.key.seal(secret, itemAD(id))
 	c.mod = now
 	return id, true, nil
 }
 
-// SetSecret replaces an item's secret.
-func (c *Collection) SetSecret(id uint32, secret []byte, contentType string, now time.Time) error {
+// SetSecret replaces an item's secret; owner, unless "", joins its owners.
+func (c *Collection) SetSecret(id uint32, secret []byte, contentType string, owner Owner, now time.Time) error {
 	e, err := c.unlocked(id)
 	if err != nil {
 		return err
 	}
+	e.own(owner)
 	e.sealed, e.ContentType, e.Modified = c.key.seal(secret, itemAD(id)), contentType, now.UTC()
 	c.mod = e.Modified
 	return nil
@@ -693,6 +714,26 @@ func (c *Collection) DeleteItem(id uint32, now time.Time) error {
 	delete(c.entries, id)
 	c.mod = now.UTC()
 	return nil
+}
+
+// AddOwner lets owner read an item without asking; the item's secret and
+// times stay as they are.
+func (c *Collection) AddOwner(id uint32, owner Owner) error {
+	e, err := c.unlocked(id)
+	if err != nil {
+		return err
+	}
+	if owner == "" {
+		return errors.New("keyring: an owner with no name")
+	}
+	e.own(owner)
+	return nil
+}
+
+func (e *entry) own(owner Owner) {
+	if owner != "" && !e.Owned(owner) {
+		e.Owners = append(e.Owners, owner)
+	}
 }
 
 func (c *Collection) unlocked(id uint32) (*entry, error) {

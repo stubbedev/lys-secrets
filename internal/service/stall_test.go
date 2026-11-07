@@ -89,7 +89,7 @@ func (f *stallFixture) search(t *testing.T) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
-		_, _, _ = serviceMethods{f.svc}.SearchItems(map[string]string{"a": "b"})
+		_, _, _ = serviceMethods{f.svc}.SearchItems("", map[string]string{"a": "b"})
 		close(done)
 	}()
 	finished(t, "SearchItems", done)
@@ -242,7 +242,7 @@ func TestAReadCompletesWhileASaveIsPendingAndTheReplyWaitsForTheDisk(t *testing.
 	saved := make(chan error, 1)
 	go func() {
 		saved <- f.svc.change(c, func(kr *keyring.Collection) error {
-			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("secret"), "text/plain", false, f.svc.now())
+			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("secret"), "text/plain", "", false, f.svc.now())
 			return err
 		}, nothingToAnnounce)
 	}()
@@ -296,7 +296,7 @@ func TestAReadCompletesWhileASaveIsPendingAndTheReplyWaitsForTheDisk(t *testing.
 // find is SearchItems's unlocked items.
 func (f *stallFixture) find(t *testing.T, attrs map[string]string) []dbus.ObjectPath {
 	t.Helper()
-	unlocked, _, derr := serviceMethods{f.svc}.SearchItems(attrs)
+	unlocked, _, derr := serviceMethods{f.svc}.SearchItems("", attrs)
 	if derr != nil {
 		t.Fatal(derr)
 	}
@@ -315,7 +315,7 @@ func TestChangesToOneCollectionReachTheDiskInTheOrderTheyCommit(t *testing.T) {
 	done := make(chan error, 2)
 	add := func(name string) {
 		done <- f.svc.change(c, func(kr *keyring.Collection) error {
-			_, _, err := kr.CreateItem(name, map[string]string{"n": name}, []byte(name), "text/plain", false, f.svc.now())
+			_, _, err := kr.CreateItem(name, map[string]string{"n": name}, []byte(name), "text/plain", "", false, f.svc.now())
 			return err
 		}, nothingToAnnounce)
 	}
@@ -353,7 +353,7 @@ func TestALockDuringAWriteLeavesTheChangeOnDiskAndTheCollectionLocked(t *testing
 	saved := make(chan error, 1)
 	go func() {
 		saved <- f.svc.change(c, func(kr *keyring.Collection) error {
-			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("s"), "text/plain", false, f.svc.now())
+			_, _, err := kr.CreateItem("label", map[string]string{"a": "b"}, []byte("s"), "text/plain", "", false, f.svc.now())
 			return err
 		}, nothingToAnnounce)
 	}()

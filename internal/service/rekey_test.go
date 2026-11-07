@@ -30,7 +30,7 @@ func loginWithItem(t *testing.T) (*fixture, uint32) {
 	f.svc.mu.Unlock()
 	err := f.svc.change(c, func(kr *keyring.Collection) error {
 		var err error
-		id, _, err = kr.CreateItem("token", map[string]string{"service": "git"}, []byte("s3cret"), "text/plain", false, time.Now())
+		id, _, err = kr.CreateItem("token", map[string]string{"service": "git"}, []byte("s3cret"), "text/plain", "", false, time.Now())
 		return err
 	}, nothingToAnnounce)
 	if err != nil {

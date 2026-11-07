@@ -24,11 +24,12 @@ import (
 var testKDF = keyring.KDF{Time: 1, MemKiB: 64, Threads: 1}
 
 // fakePrompter answers prompts from a script: each answer is a password,
-// or "" to dismiss.
+// or "" to dismiss; a read is confirmed with "allow" or "always".
 type fakePrompter struct {
 	mu      sync.Mutex
 	answers []string
 	asked   []string
+	reads   []ReadRequest
 }
 
 func (f *fakePrompter) next(kind string) ([]byte, bool, error) {
@@ -71,10 +72,30 @@ func (f *fakePrompter) PreviousLoginPassword(_ context.Context, retry bool) ([]b
 	return f.next(kind)
 }
 
+func (f *fakePrompter) ConfirmRead(_ context.Context, r ReadRequest) (Access, error) {
+	f.mu.Lock()
+	f.reads = append(f.reads, r)
+	f.mu.Unlock()
+	answer, _, _ := f.next("read " + r.Item)
+	switch string(answer) {
+	case "allow":
+		return AllowedOnce, nil
+	case "always":
+		return AllowedAlways, nil
+	}
+	return Denied, nil
+}
+
 func (f *fakePrompter) script(answers ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.answers, f.asked = answers, nil
+}
+
+func (f *fakePrompter) readRequests() []ReadRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ReadRequest(nil), f.reads...)
 }
 
 func (f *fakePrompter) log() []string {
@@ -88,6 +109,7 @@ type fixture struct {
 	dir      string
 	prompter *fakePrompter
 	svc      *Service
+	confirm  bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -99,7 +121,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) start(t *testing.T) {
 	t.Helper()
-	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter})
+	svc, err := Start(f.bus.Conn(t), Config{Dir: f.dir, KDF: testKDF, Stretch: keyring.Argon2id, Prompter: f.prompter, ConfirmForeignReads: f.confirm})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,23 +287,39 @@ func TestGitCredentialLibsecret(t *testing.T) {
 	if helper == "" {
 		t.Skip("GIT_CREDENTIAL_LIBSECRET is not set (the nix dev shell sets it)")
 	}
-	f := newFixture(t)
-	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
-		t.Fatal(err)
-	}
-	cred := "protocol=https\nhost=example.com\nusername=me\npassword=git-pw\n\n"
-	if _, err := run(t, cred, helper, "store"); err != nil {
-		t.Fatalf("store: %v", err)
-	}
-	out, err := run(t, "protocol=https\nhost=example.com\n\n", helper, "get")
-	if err != nil || !strings.Contains(out, "password=git-pw") || !strings.Contains(out, "username=me") {
-		t.Fatalf("get = %q, %v", out, err)
-	}
-	if _, err := run(t, cred, helper, "erase"); err != nil {
-		t.Fatalf("erase: %v", err)
-	}
-	if out, _ := run(t, "protocol=https\nhost=example.com\n\n", helper, "get"); strings.Contains(out, "password=") {
-		t.Errorf("get after erase = %q", out)
+	for _, confirm := range []bool{false, true} {
+		f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}, confirm: confirm}
+		f.start(t)
+		if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
+			t.Fatal(err)
+		}
+		cred := "protocol=https\nhost=example.com\nusername=me\npassword=git-pw\n\n"
+		if _, err := run(t, cred, helper, "store"); err != nil {
+			t.Fatalf("confirm %v: store: %v", confirm, err)
+		}
+		out, err := run(t, "protocol=https\nhost=example.com\n\n", helper, "get")
+		if err != nil || !strings.Contains(out, "password=git-pw") || !strings.Contains(out, "username=me") {
+			t.Fatalf("confirm %v: get = %q, %v", confirm, out, err)
+		}
+		if confirm {
+			tool := requireTool(t, "secret-tool")
+			f.prompter.script("allow")
+			if got, err := run(t, "", tool, "lookup", "server", "example.com"); err != nil || got != "git-pw" {
+				t.Errorf("another program's lookup after one allow = %q, %v", got, err)
+			}
+			if got := f.prompter.log(); !slices.Equal(got, []string{"read Git: https://example.com/"}) {
+				t.Errorf("asked %v, want one read confirmed", got)
+			}
+			if out, err := run(t, "protocol=https\nhost=example.com\n\n", helper, "get"); err != nil || !strings.Contains(out, "password=git-pw") {
+				t.Errorf("the helper's own get after the allow = %q, %v", out, err)
+			}
+		}
+		if _, err := run(t, cred, helper, "erase"); err != nil {
+			t.Fatalf("confirm %v: erase: %v", confirm, err)
+		}
+		if out, _ := run(t, "protocol=https\nhost=example.com\n\n", helper, "get"); strings.Contains(out, "password=") {
+			t.Errorf("confirm %v: get after erase = %q", confirm, out)
+		}
 	}
 }
 

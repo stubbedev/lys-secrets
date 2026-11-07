@@ -29,6 +29,7 @@
               collections = {
                 lockAfter = 10;
                 lockOnScreenLock = true;
+                confirmForeignReads = true;
               };
             };
           }
@@ -81,7 +82,7 @@
           && home.xdg.configFile."systemd/user/graphical-session.target.wants/lys-secrets.service".source
           == "${pkg}/lib/systemd/user/lys-secrets.service"
           && home.xdg.configFile."systemd/user/lys-secrets.service.d/vault.conf".text
-          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m --vault-collection-folder=\"Desk top\" --collection-lock-after=10m --collection-lock-on-screen-lock\n"
+          == "[Service]\nExecStart=\nExecStart=${pkg}/bin/lys-secrets --vault-lock-after=5m --vault-sync-interval=30m --vault-collection-folder=\"Desk top\" --collection-lock-after=10m --collection-lock-on-screen-lock --confirm-foreign-reads\n"
         );
 
         # NixOS hands the package to D-Bus and systemd and starts the unit

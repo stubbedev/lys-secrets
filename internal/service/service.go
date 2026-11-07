@@ -5,8 +5,10 @@
 // the user through a Prompter.
 //
 // Every client on the user's bus may read an unlocked collection, as
-// with gnome-keyring; sandboxed apps reach their secrets through the
-// portal instead, which identifies them.
+// with gnome-keyring, unless reads are confirmed: then a program reading
+// an item it does not own sees it locked, and its Unlock prompt asks the
+// user. Sandboxed apps reach their secrets through the portal instead,
+// which identifies them.
 package service
 
 import (
@@ -79,6 +81,8 @@ type Prompter interface {
 	// MasterPassword asks for the Bitwarden vault's master password;
 	// retry says the previous attempt was wrong.
 	MasterPassword(ctx context.Context, retry bool) (password []byte, ok bool, err error)
+	// ConfirmRead asks whether a program may read an item it does not own.
+	ConfirmRead(ctx context.Context, r ReadRequest) (Access, error)
 	// PreviousLoginPassword asks for the login password from before it
 	// changed, to move the login collection to the new one; ok is false
 	// when the user keeps the old password apart. retry says the previous
@@ -101,6 +105,9 @@ type Config struct {
 	// LockAfter locks a collection once no secret was read from it and
 	// nothing in it changed for this long; 0 never does.
 	LockAfter time.Duration
+	// ConfirmForeignReads asks the user before a program reads an item it
+	// does not own.
+	ConfirmForeignReads bool
 }
 
 // Service is a running Secret Service.
@@ -129,8 +136,13 @@ type Service struct {
 	aliasOff map[string]func()
 	sessions map[dbus.ObjectPath]*session
 	prompts  map[dbus.ObjectPath]func()
-	nextID   uint64
-	closed   bool
+	// clients names the program behind each bus connection.
+	peers *peers
+	// grants are the items each connection was allowed to read once, by
+	// unique name, kept until it leaves or the collection locks.
+	grants map[string]map[itemRef]struct{}
+	nextID uint64
+	closed bool
 	// stops undo, in reverse, what Start set up beyond the collections,
 	// aliases, vault, sessions and prompts: the root object, the
 	// missing-collection subtrees, the owner watch and the bus name.
@@ -186,6 +198,7 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 		conn: conn, cfg: cfg, disk: disk{dir: cfg.Dir, write: atomicfile.WriteFile},
 		colls: map[string]*collection{}, reserved: map[string]struct{}{}, aliasOff: map[string]func(){},
 		sessions: map[dbus.ObjectPath]*session{}, prompts: map[dbus.ObjectPath]func(){},
+		peers: newPeers(conn), grants: map[string]map[itemRef]struct{}{},
 		signals: newSignalQueue(conn.Emit),
 	}
 	var err error
@@ -830,6 +843,7 @@ func (s *Service) lockCollectionLocked(c *collection) {
 	if err := c.kr.Lock(); err != nil {
 		log.Printf("secrets: lock collection %s: its key is destroyed, but it opens again only after a restart: %v", c.id, err)
 	}
+	s.dropGrantsLocked(c.id)
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 }
 
@@ -876,12 +890,14 @@ func (s *Service) closeSessionsOfLeavers(signals <-chan *dbus.Signal, done <-cha
 		if newOwner != "" || !strings.HasPrefix(name, ":") {
 			continue
 		}
+		s.peers.forget(name)
 		s.mu.Lock()
 		for path, sess := range s.sessions {
 			if sess.owner == name {
 				s.closeSessionLocked(path)
 			}
 		}
+		delete(s.grants, name)
 		s.mu.Unlock()
 	}
 }

@@ -10,6 +10,7 @@
 // this.
 //
 //	lys-secrets [--unlock-fd N] [--collection-lock-after D] [--collection-lock-on-screen-lock]
+//	            [--confirm-foreign-reads]
 //	            [--vault-lock-after D] [--vault-sync-interval D] [--vault-collection-folder NAME]
 //
 // The login collection unlocks with the password the user logs in or
@@ -60,6 +61,7 @@ type options struct {
 	vaultFolder         string
 	collectionLockAfter time.Duration
 	lockOnScreenLock    bool
+	confirmForeignReads bool
 }
 
 func main() {
@@ -67,6 +69,7 @@ func main() {
 	flag.IntVar(&o.unlockFD, "unlock-fd", -1, "read the login password from this inherited descriptor and unlock the login collection with it")
 	flag.DurationVar(&o.collectionLockAfter, "collection-lock-after", 0, "lock a collection after no secret was read from it and nothing in it changed for this long; 0 keeps it open until locked")
 	flag.BoolVar(&o.lockOnScreenLock, "collection-lock-on-screen-lock", false, "lock every collection when logind says the session locked")
+	flag.BoolVar(&o.confirmForeignReads, "confirm-foreign-reads", false, "ask before a program reads an item another program stored")
 	flag.DurationVar(&o.vault.LockAfter, "vault-lock-after", 15*time.Minute, "lock the Bitwarden vault after it went unused this long; 0 keeps it open until locked")
 	flag.DurationVar(&o.vault.SyncInterval, "vault-sync-interval", 30*time.Minute, "sync the open Bitwarden vault this often; 0 syncs only on unlock and when asked")
 	flag.StringVar(&o.vaultFolder, "vault-collection-folder", "", "show the logins of this Bitwarden folder as the Secret Service's \"bitwarden\" collection; empty shows none")
@@ -146,7 +149,7 @@ func run(o options) error {
 	svc, err := service.Start(conn, service.Config{
 		Dir: filepath.Join(data, "lys-secrets"), KDF: keyring.DefaultKDF, Stretch: keyring.Argon2id, Prompter: prompt.New(conn),
 		Vault:     vaultCollection{bw: bw, folder: o.vaultFolder},
-		LockAfter: o.collectionLockAfter,
+		LockAfter: o.collectionLockAfter, ConfirmForeignReads: o.confirmForeignReads,
 	})
 	if errors.Is(err, dbusx.ErrNameTaken) {
 		var owner string

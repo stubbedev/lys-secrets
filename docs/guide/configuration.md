@@ -10,6 +10,7 @@ the Nix modules write those flags for you.
 | `--unlock-fd N` | none | Read the login password from inherited descriptor `N` and unlock the `login` collection with it, creating the collection if there is none |
 | `--collection-lock-after D` | `0` | Lock a collection once no secret was read from it and nothing in it changed for this long; `0` keeps it open until something locks it |
 | `--collection-lock-on-screen-lock` | off | Lock every collection when logind says the session locked |
+| `--confirm-foreign-reads` | off | Ask before a program reads an item another program stored; see [Confirming reads](/guide/security#confirming-reads) |
 | `--vault-lock-after D` | `15m` | Lock the vault once no field was read from it for this long; `0` keeps it open until something locks it |
 | `--vault-sync-interval D` | `30m` | Sync the open vault this often; `0` syncs only on unlock and when asked |
 | `--vault-collection-folder NAME` | empty | Show the logins of this vault folder as the read-only `bitwarden` collection; empty shows none |
@@ -58,6 +59,7 @@ Both the NixOS and the home-manager module take these, under
 | `package` | the flake's package | |
 | `collections.lockAfter` | `0` (minutes) | `--collection-lock-after` |
 | `collections.lockOnScreenLock` | `false` | `--collection-lock-on-screen-lock` |
+| `collections.confirmForeignReads` | `false` | `--confirm-foreign-reads` |
 | `vault.lockAfter` | `15` (minutes) | `--vault-lock-after` |
 | `vault.syncInterval` | `30` (minutes) | `--vault-sync-interval` |
 | `vault.collectionFolder` | `""` | `--vault-collection-folder` |

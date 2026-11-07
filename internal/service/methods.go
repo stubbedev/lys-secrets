@@ -104,16 +104,19 @@ func (m serviceMethods) CreateCollection(props map[string]dbus.Variant, alias st
 	return noPrompt, prompt, nil
 }
 
-// SearchItems is every item matching attrs, unlocked and locked apart.
-func (m serviceMethods) SearchItems(attrs map[string]string) ([]dbus.ObjectPath, []dbus.ObjectPath, *dbus.Error) {
+// SearchItems is every item matching attrs, unlocked and locked apart. When
+// reads are confirmed, an item the caller may not read without asking is
+// locked to it.
+func (m serviceMethods) SearchItems(sender dbus.Sender, attrs map[string]string) ([]dbus.ObjectPath, []dbus.ObjectPath, *dbus.Error) {
 	s := m.s
+	cl, confirm := s.reader(sender)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	unlocked, locked := []dbus.ObjectPath{}, []dbus.ObjectPath{}
 	for _, id := range slices.Sorted(maps.Keys(s.colls)) {
 		c := s.colls[id]
 		for _, iid := range c.kr.Search(attrs) {
-			if c.kr.Locked() {
+			if c.kr.Locked() || confirm && !s.mayReadLocked(sender, cl, c, iid) {
 				locked = append(locked, itemPath(id, iid))
 			} else {
 				unlocked = append(unlocked, itemPath(id, iid))
@@ -124,13 +127,16 @@ func (m serviceMethods) SearchItems(attrs map[string]string) ([]dbus.ObjectPath,
 	return unlocked, locked, nil
 }
 
-// Unlock returns what is unlocked already and a prompt for the rest.
-func (m serviceMethods) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.ObjectPath, *dbus.Error) {
+// Unlock returns what is unlocked already and a prompt for the rest: the
+// passwords of locked collections, then, when reads are confirmed, the
+// user's leave for each item the caller does not own.
+func (m serviceMethods) Unlock(sender dbus.Sender, objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.ObjectPath, *dbus.Error) {
 	s := m.s
+	cl, confirm := s.reader(sender)
 	s.mu.Lock()
 	unlocked := []dbus.ObjectPath{}
 	pending := map[string][]dbus.ObjectPath{}
-	var pendingVault []dbus.ObjectPath
+	var pendingVault, pendingReads []dbus.ObjectPath
 	for _, p := range objects {
 		if s.isVaultPathLocked(p) {
 			if s.vault.open {
@@ -140,33 +146,48 @@ func (m serviceMethods) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, db
 			}
 			continue
 		}
-		c, _, ok := s.resolveLocked(p)
-		if !ok {
-			continue
-		}
-		if c.kr.Locked() {
+		c, iid, ok := s.resolveLocked(p)
+		switch {
+		case !ok:
+		case c.kr.Locked():
 			pending[c.id] = append(pending[c.id], p)
-		} else {
+		case confirm && iid != 0 && !s.mayReadLocked(sender, cl, c, iid):
+			pendingReads = append(pendingReads, p)
+		default:
 			unlocked = append(unlocked, p)
 		}
 	}
 	s.mu.Unlock()
-	if len(pending) == 0 && len(pendingVault) == 0 {
+	if len(pending) == 0 && len(pendingVault) == 0 && len(pendingReads) == 0 {
 		return unlocked, noPrompt, nil
 	}
 	prompt, derr := s.newPrompt(func(ctx context.Context) (bool, dbus.Variant) {
 		done := []dbus.ObjectPath{}
+		reads := pendingReads
 		for _, id := range slices.Sorted(maps.Keys(pending)) {
 			if !s.promptUnlock(ctx, id) {
 				return true, dbus.MakeVariant(done)
 			}
-			done = append(done, pending[id]...)
+			if confirm {
+				reads = append(reads, pending[id]...)
+			} else {
+				done = append(done, pending[id]...)
+			}
 		}
 		if len(pendingVault) > 0 {
 			if !s.promptVaultUnlock(ctx) {
 				return true, dbus.MakeVariant(done)
 			}
 			done = append(done, pendingVault...)
+		}
+		for _, p := range reads {
+			s.mu.Lock()
+			c, iid, ok := s.resolveLocked(p)
+			s.mu.Unlock()
+			if ok && iid != 0 && !s.confirmRead(ctx, sender, cl, itemRef{c.id, iid}) {
+				return true, dbus.MakeVariant(done)
+			}
+			done = append(done, p)
 		}
 		return false, dbus.MakeVariant(done)
 	})
@@ -272,16 +293,26 @@ func (m serviceMethods) ChangeLock(collection dbus.ObjectPath) (dbus.ObjectPath,
 	})
 }
 
-// GetSecrets returns the secrets of the unlocked items among items.
+// GetSecrets returns the secrets of the unlocked items among items; when
+// reads are confirmed, only of those the caller may read without asking, and
+// the caller owns those nobody owned before.
 func (m serviceMethods) GetSecrets(sender dbus.Sender, items []dbus.ObjectPath, sessPath dbus.ObjectPath) (map[dbus.ObjectPath]Secret, *dbus.Error) {
 	s := m.s
+	cl, confirm := s.reader(sender)
+	out, claims, derr := s.getSecrets(sender, cl, confirm, items, sessPath)
+	s.claim(cl, claims)
+	return out, derr
+}
+
+func (s *Service) getSecrets(sender dbus.Sender, cl peer, confirm bool, items []dbus.ObjectPath, sessPath dbus.ObjectPath) (map[dbus.ObjectPath]Secret, []itemRef, *dbus.Error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, derr := s.sessionLocked(sessPath, sender)
 	if derr != nil {
-		return nil, derr
+		return nil, nil, derr
 	}
 	out := map[dbus.ObjectPath]Secret{}
+	var read []itemRef
 	for _, p := range items {
 		if s.isVaultPathLocked(p) && p != collectionPath(VaultID) {
 			if !s.vault.open {
@@ -289,22 +320,26 @@ func (m serviceMethods) GetSecrets(sender dbus.Sender, items []dbus.ObjectPath, 
 			}
 			secret, derr := s.vaultSecretLocked(p, sessPath, sess)
 			if derr != nil {
-				return nil, derr
+				return nil, nil, derr
 			}
 			out[p] = secret
 			continue
 		}
 		c, id, ok := s.resolveLocked(p)
-		if !ok || id == 0 || c.kr.Locked() {
+		if !ok || id == 0 || c.kr.Locked() || confirm && !s.mayReadLocked(sender, cl, c, id) {
 			continue
 		}
 		secret, derr := s.secretLocked(c, id, sessPath, sess)
 		if derr != nil {
-			return nil, derr
+			return nil, nil, derr
 		}
 		out[p] = secret
+		read = append(read, itemRef{c.id, id})
 	}
-	return out, nil
+	if !confirm {
+		return out, nil, nil
+	}
+	return out, s.claimsLocked(cl, read), nil
 }
 
 // ReadAlias is the collection an alias names, "/" for none.
@@ -439,6 +474,7 @@ func (m collectionMethods) SearchItems(attrs map[string]string) ([]dbus.ObjectPa
 // prompt first, whose result is the item.
 func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.Variant, secret Secret, replace bool) (dbus.ObjectPath, dbus.ObjectPath, *dbus.Error) {
 	s := m.s
+	owner := s.peers.identify(string(sender)).program
 	label, attrs := "", map[string]string{}
 	if v, ok := props[propItemLabel]; ok {
 		if label, ok = v.Value().(string); !ok {
@@ -472,7 +508,7 @@ func (m collectionMethods) CreateItem(sender dbus.Sender, props map[string]dbus.
 		var created bool
 		err := s.change(c, func(kr *keyring.Collection) error {
 			var err error
-			id, created, err = kr.CreateItem(label, attrs, value, secret.ContentType, replace, s.now())
+			id, created, err = kr.CreateItem(label, attrs, value, secret.ContentType, owner, replace, s.now())
 			return err
 		}, func() error {
 			path := itemPath(c.id, id)
@@ -546,25 +582,37 @@ func (m itemMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	return noPrompt, nil
 }
 
-// GetSecret returns the secret, encoded for the caller's session.
+// GetSecret returns the secret, encoded for the caller's session. When reads
+// are confirmed, an item the caller may not read without asking is locked to
+// it, and the caller owns one nobody owned before.
 func (m itemMethods) GetSecret(sender dbus.Sender, sessPath dbus.ObjectPath) (Secret, *dbus.Error) {
 	s := m.s
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, derr := s.sessionLocked(sessPath, sender)
+	cl, confirm := s.reader(sender)
+	secrets, claims, derr := s.getSecrets(sender, cl, confirm, []dbus.ObjectPath{itemPath(m.cid, m.id)}, sessPath)
+	s.claim(cl, claims)
 	if derr != nil {
 		return Secret{}, derr
 	}
+	secret, ok := secrets[itemPath(m.cid, m.id)]
+	if ok {
+		return secret, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	c, ok := s.colls[m.cid]
 	if !ok {
 		return Secret{}, noSuchObject(itemPath(m.cid, m.id))
 	}
-	return s.secretLocked(c, m.id, sessPath, sess)
+	if _, err := c.kr.Item(m.id); err != nil {
+		return Secret{}, lockedErr(err)
+	}
+	return Secret{}, lockedErr(keyring.ErrLocked)
 }
 
 // SetSecret replaces the secret.
 func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 	s := m.s
+	owner := s.peers.identify(string(sender)).program
 	s.mu.Lock()
 	sess, derr := s.sessionLocked(secret.Session, sender)
 	if derr != nil {
@@ -582,7 +630,9 @@ func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 		return dbusx.InvalidArgs("decode the secret: " + err.Error())
 	}
 	defer clear(value)
-	err = s.change(c, func(kr *keyring.Collection) error { return kr.SetSecret(m.id, value, secret.ContentType, s.now()) }, func() error {
+	err = s.change(c, func(kr *keyring.Collection) error {
+		return kr.SetSecret(m.id, value, secret.ContentType, owner, s.now())
+	}, func() error {
 		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, m.id))
 		return nil
 	})

@@ -6,11 +6,17 @@ package prompt
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/stubbedev/lys-lib/portaldialogs"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+
+	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/service"
 )
 
 // Dialogs is a service.Prompter over the shell's dialogs.
@@ -22,10 +28,10 @@ type Dialogs struct {
 // New prompts through the dialog host on conn.
 func New(conn *dbus.Conn) *Dialogs { return &Dialogs{client: portaldialogs.NewClient(conn)} }
 
-func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]byte, bool, error) {
+// caller is a new prompt's caller, taken down with ctx.
+func (d *Dialogs) caller(ctx context.Context) (portaldialogs.Caller, func()) {
 	caller := portaldialogs.Caller{Handle: fmt.Sprintf("/dev/stubbe/lys/secrets/prompt/%d", d.seq.Add(1))}
 	done := make(chan struct{})
-	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -35,6 +41,12 @@ func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]b
 		case <-done:
 		}
 	}()
+	return caller, func() { close(done) }
+}
+
+func (d *Dialogs) ask(ctx context.Context, r portaldialogs.PasswordRequest) ([]byte, bool, error) {
+	caller, done := d.caller(ctx)
+	defer done()
 	ok, password, _, err := d.client.Password(ctx, caller, r)
 	if err != nil {
 		return nil, false, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
@@ -81,4 +93,52 @@ func (d *Dialogs) PreviousLoginPassword(ctx context.Context, retry bool) ([]byte
 		AcceptLabel: "Update",
 		CancelLabel: "Keep the old password",
 	})
+}
+
+// alwaysChoice is ConfirmRead's choice to make the program an owner.
+const alwaysChoice = "always"
+
+// ConfirmRead asks whether a program may read an item it does not own.
+func (d *Dialogs) ConfirmRead(ctx context.Context, r service.ReadRequest) (service.Access, error) {
+	caller, done := d.caller(ctx)
+	defer done()
+	who, details := "A program that could not be identified", fmt.Sprintf("Process %d", r.PID)
+	var choices []portaldialogs.Choice
+	if r.Program != "" {
+		who = programName(r.Program)
+		details = "Program: " + string(r.Program)
+		choices = []portaldialogs.Choice{{ID: alwaysChoice, Label: "Always allow " + who + " to read it", Options: []portaldialogs.Option{}}}
+	}
+	stored := make([]string, len(r.Owners))
+	for i, o := range r.Owners {
+		stored[i] = string(o)
+	}
+	granted, picked, err := d.client.Access(ctx, caller, portaldialogs.AccessRequest{
+		Title:      "Allow access to a secret?",
+		Subtitle:   fmt.Sprintf("%s wants to read “%s” from the “%s” keyring.", who, r.Item, r.Collection),
+		Body:       details + "\nStored by: " + strings.Join(stored, ", "),
+		GrantLabel: "Allow",
+		DenyLabel:  "Deny",
+		Icon:       "dialog-password",
+		Choices:    choices,
+	})
+	if err != nil {
+		return service.Denied, fmt.Errorf("ask through %s: %w", portaldialogs.ServiceName, err)
+	}
+	if !granted {
+		return service.Denied, nil
+	}
+	if slices.Contains(picked, portaldialogs.Selection{ID: alwaysChoice, Value: "true"}) {
+		return service.AllowedAlways, nil
+	}
+	return service.AllowedOnce, nil
+}
+
+// programName is how the dialog names a program: a Flatpak app by its id,
+// anything else by its executable's name.
+func programName(p keyring.Owner) string {
+	if app, ok := strings.CutPrefix(string(p), "flatpak:"); ok {
+		return app
+	}
+	return filepath.Base(string(p))
 }

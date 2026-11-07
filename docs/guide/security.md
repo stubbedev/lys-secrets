@@ -2,7 +2,9 @@
 
 lys-secrets protects secrets in a locked collection, on a disk someone else reads,
 and from other users of the machine. It does not protect an unlocked collection
-from programs you run: as with gnome-keyring, anything running as you can read it.
+from programs you run: as with gnome-keyring, anything running as you can read it,
+unless you [confirm reads](#confirming-reads), which slows careless exfiltration
+down without stopping a determined program.
 
 This page says what each layer does and where it stops.
 
@@ -91,7 +93,7 @@ Where this stops:
 The Secret Service API has **no caller check**. Every program on your session bus
 can do the following, with no prompt:
 
-- Read every secret in an unlocked collection, and in the `bitwarden` collection
+- Read every secret in an unlocked collection, unless [reads are confirmed](#confirming-reads), and in the `bitwarden` collection
   while the vault is open.
 - See a locked collection's item paths, and search it by attribute value.
 - Change or delete items in an unlocked collection.
@@ -112,6 +114,43 @@ there.
 
 A client can only open secrets over a session it opened itself, and its sessions
 close when it leaves the bus.
+
+### Confirming reads
+
+With `--confirm-foreign-reads`, each item remembers its owners: the programs that
+stored or changed it, and those you always allowed. They are kept in the encrypted
+body, not the readable index. A program reading an item it does not own sees the item
+as locked: a search lists it among the locked items and a read returns nothing, so
+libsecret asks to unlock it, and that `Unlock` prompt shows a dialog naming the
+program, its path, the item, its keyring and its owners:
+
+| Answer | What happens |
+| --- | --- |
+| **Deny** | The prompt completes dismissed and the program reads nothing |
+| **Allow** | That program's bus connection may read the item until it leaves the bus or the collection locks |
+| **Always allow** (the checkbox) | The program joins the item's owners, and reads it unasked from then on, across restarts |
+
+A program is its executable's path, from `/proc/<pid>/exe` of the process the bus
+names; a Flatpak app is its app id, from its `.flatpak-info`. Where the bus hands over
+a pidfd (dbus-broker), lys-secrets checks the process still lives after naming it, so a
+reused pid cannot pass as another program. A program that cannot be named, such as one
+that made itself undumpable, can be allowed only for its connection.
+
+Items stored before owners were kept have none. Their first reader becomes the owner
+without a dialog, and the log says so.
+
+Where this stops:
+
+- An interpreter is one program: every Python script or Node package you run is
+  `python3` or `node`, so allowing one allows all of them.
+- A program running as you can attach to an allowed program, or replace a binary it
+  can write, and read through it. This is a speed bump against careless exfiltration,
+  such as a package's install script enumerating the keyring, not a sandbox.
+- Labels and attributes are not covered: any client still searches, and reads them
+  from the item's properties.
+- The `bitwarden` collection is not covered.
+- With the flag off, a read asks the bus nothing; storing an item still records who
+  stored it, so turning the flag on later knows the owners.
 
 An app in a sandbox should go through the portal. One allowed to talk to
 `org.freedesktop.secrets` directly gets the same access as any other client.

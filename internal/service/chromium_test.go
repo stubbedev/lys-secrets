@@ -10,15 +10,31 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stubbedev/lys-lib/dbustest"
 )
 
 // Chromium keeps its cookie encryption key in the Secret Service: the
 // first run creates "Chromium Safe Storage", a second run reads it back
 // and decrypts the cookie the first one stored.
 func TestChromiumKeepsItsSafeStorageKey(t *testing.T) {
+	for _, confirm := range []bool{false, true} {
+		t.Run(map[bool]string{false: "every reader", true: "reads confirmed"}[confirm], func(t *testing.T) {
+			chromiumKeepsItsKey(t, confirm)
+		})
+	}
+}
+
+// chromiumKeepsItsKey runs Chromium twice; with reads confirmed, secret-tool,
+// another program, is allowed once each time it looks.
+func chromiumKeepsItsKey(t *testing.T, confirm bool) {
 	chromium := requireTool(t, "chromium")
 	tool := requireTool(t, "secret-tool")
-	f := newFixture(t)
+	f := &fixture{bus: dbustest.Session(t), dir: t.TempDir(), prompter: &fakePrompter{}, confirm: confirm}
+	f.start(t)
+	if confirm {
+		f.prompter.script("allow", "allow")
+	}
 	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +68,11 @@ func TestChromiumKeepsItsSafeStorageKey(t *testing.T) {
 	}
 	keys := func() string {
 		t.Helper()
-		out, err := run(t, "", tool, "search", "--all", "application", "chromium")
+		args := []string{"search", "--all", "application", "chromium"}
+		if confirm {
+			args = append(args, "--unlock")
+		}
+		out, err := run(t, "", tool, args...)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
@@ -61,7 +81,7 @@ func TestChromiumKeepsItsSafeStorageKey(t *testing.T) {
 
 	browse("/set")
 	first := keys()
-	if strings.Count(first, "label = Chromium Safe Storage") != 1 {
+	if strings.Count(first, "label = Chromium Safe Storage") != 1 || confirm && !strings.Contains(first, "secret = ") {
 		t.Fatalf("after the first run the keyring holds:\n%s", first)
 	}
 	if got := browse("/read"); !strings.Contains(got, "cookie=kept=across-runs") {
@@ -69,5 +89,8 @@ func TestChromiumKeepsItsSafeStorageKey(t *testing.T) {
 	}
 	if second := keys(); second != first {
 		t.Errorf("the second run changed the key:\n%s\nwas:\n%s", second, first)
+	}
+	if want := map[bool]int{false: 0, true: 2}[confirm]; len(f.prompter.log()) != want {
+		t.Errorf("asked %v, want %d reads confirmed", f.prompter.log(), want)
 	}
 }

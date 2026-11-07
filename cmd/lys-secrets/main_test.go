@@ -23,6 +23,7 @@ import (
 	"github.com/stubbedev/lys-lib/xdg"
 
 	"github.com/stubbedev/lys-secrets/control"
+	"github.com/stubbedev/lys-secrets/internal/dialogtest"
 	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/vault"
 )
@@ -391,11 +392,11 @@ func TestAChangedLoginPasswordIsTakenOverThroughOneDialog(t *testing.T) {
 	}
 	defer conn.Close()
 	answered := make(chan struct{}, 4)
-	host := &fakeHost{password: func(portaldialogs.PasswordRequest) (bool, string, []portaldialogs.Selection) {
+	host := &dialogtest.Host{Password: func(portaldialogs.PasswordRequest) (bool, string, []portaldialogs.Selection) {
 		defer func() { answered <- struct{}{} }()
 		return true, "old-pw", nil
 	}}
-	serveHost(t, conn, host)
+	dialogtest.Serve(t, conn, host)
 	d = start(t, "")
 	d.waitLog(t, "serving org.freedesktop.secrets")
 	sock, err := control.SocketPath(xdg.OS)
@@ -420,14 +421,14 @@ func TestAChangedLoginPasswordIsTakenOverThroughOneDialog(t *testing.T) {
 	if err := control.Unlock(sock, []byte("new-pw")); err != nil {
 		t.Errorf("the new password after the re-key = %v", err)
 	}
-	passwords, _ := host.asked()
+	passwords, _ := host.Asked()
 	if len(passwords) != 1 || passwords[0].AcceptLabel != "Update" || passwords[0].CancelLabel != "Keep the old password" {
 		t.Errorf("asked %+v, want one dialog with Update and Keep the old password", passwords)
 	}
 	if err := control.Rekey(sock, []byte("new-pw"), []byte("newer-pw")); err != nil {
 		t.Errorf("Rekey over the socket = %v", err)
 	}
-	if passwords, _ := host.asked(); len(passwords) != 1 {
+	if passwords, _ := host.Asked(); len(passwords) != 1 {
 		t.Errorf("Rekey over the socket showed a dialog: %+v", passwords)
 	}
 }

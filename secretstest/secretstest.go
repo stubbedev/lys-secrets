@@ -81,3 +81,7 @@ func (p *prompts) MasterPassword(context.Context, bool) ([]byte, bool, error) { 
 func (p *prompts) PreviousLoginPassword(context.Context, bool) ([]byte, bool, error) {
 	return p.next()
 }
+
+func (p *prompts) ConfirmRead(context.Context, service.ReadRequest) (service.Access, error) {
+	return service.Denied, nil
+}

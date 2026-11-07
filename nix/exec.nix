@@ -18,3 +18,8 @@ cfg:
   then " --collection-lock-on-screen-lock"
   else ""
 )
++ (
+  if cfg.collections.confirmForeignReads
+  then " --confirm-foreign-reads"
+  else ""
+)

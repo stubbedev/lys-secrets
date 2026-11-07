@@ -34,6 +34,17 @@ self: {
         `vault.lockAfter`.
       '';
     };
+    confirmForeignReads = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Ask through the desktop's dialog before a program reads an item it did
+        not store: Deny, Allow (for that program's connection) or Always allow
+        (it joins the item's owners). Programs are told apart by their
+        executable, so every script one interpreter runs counts as one program.
+        A speed bump against careless exfiltration, not a sandbox.
+      '';
+    };
   };
 
   vault = {

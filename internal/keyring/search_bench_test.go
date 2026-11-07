@@ -17,7 +17,7 @@ func BenchmarkSearch(b *testing.B) {
 			"user":       "user" + strconv.Itoa(i),
 			"protocol":   "https",
 		}
-		if _, _, err := c.CreateItem("item", attrs, []byte("s"), "text/plain", false, t0); err != nil {
+		if _, _, err := c.CreateItem("item", attrs, []byte("s"), "text/plain", "", false, t0); err != nil {
 			b.Fatal(err)
 		}
 	}

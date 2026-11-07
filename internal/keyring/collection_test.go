@@ -27,7 +27,7 @@ func newTestCollection(t *testing.T, password string) *Collection {
 
 func mustCreate(t *testing.T, c *Collection, label string, attrs map[string]string, secret string) uint32 {
 	t.Helper()
-	id, _, err := c.CreateItem(label, attrs, []byte(secret), "text/plain", false, t0)
+	id, _, err := c.CreateItem(label, attrs, []byte(secret), "text/plain", "", false, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,16 +116,16 @@ func TestWrongPasswordStaysLocked(t *testing.T) {
 func TestLockSealsChangesAndUnlockRestoresThem(t *testing.T) {
 	c := newTestCollection(t, "pw")
 	id := mustCreate(t, c, "a", map[string]string{"k": "v"}, "one")
-	if err := c.SetSecret(id, []byte("two"), "text/plain", t0); err != nil {
+	if err := c.SetSecret(id, []byte("two"), "text/plain", "", t0); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Lock(); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetSecret(id, []byte("three"), "text/plain", t0); !errors.Is(err, ErrLocked) {
+	if err := c.SetSecret(id, []byte("three"), "text/plain", "", t0); !errors.Is(err, ErrLocked) {
 		t.Errorf("SetSecret locked = %v", err)
 	}
-	if _, _, err := c.CreateItem("b", nil, []byte("x"), "", false, t0); !errors.Is(err, ErrLocked) {
+	if _, _, err := c.CreateItem("b", nil, []byte("x"), "", "", false, t0); !errors.Is(err, ErrLocked) {
 		t.Errorf("CreateItem locked = %v", err)
 	}
 	if err := c.Unlock([]byte("nope")); !errors.Is(err, ErrWrongPassword) {
@@ -221,7 +221,7 @@ func TestReplaceUpdatesTheItemWithTheSameAttributes(t *testing.T) {
 	c := newTestCollection(t, "pw")
 	attrs := map[string]string{"service": "git"}
 	id := mustCreate(t, c, "old", attrs, "1")
-	got, created, err := c.CreateItem("new", attrs, []byte("2"), "text/plain", true, t0)
+	got, created, err := c.CreateItem("new", attrs, []byte("2"), "text/plain", "", true, t0)
 	if err != nil || created || got != id {
 		t.Fatalf("replace = %d created %v, %v; want %d updated", got, created, err, id)
 	}
@@ -229,12 +229,12 @@ func TestReplaceUpdatesTheItemWithTheSameAttributes(t *testing.T) {
 		t.Error("replace kept the old secret")
 	}
 	// A superset of attributes is a different item.
-	other, created, _ := c.CreateItem("x", map[string]string{"service": "git", "user": "me"}, []byte("3"), "", true, t0)
+	other, created, _ := c.CreateItem("x", map[string]string{"service": "git", "user": "me"}, []byte("3"), "", "", true, t0)
 	if !created || other == id {
 		t.Error("replace matched an item with different attributes")
 	}
 	// Without replace, the same attributes make a second item.
-	dup, created, _ := c.CreateItem("dup", attrs, []byte("4"), "", false, t0)
+	dup, created, _ := c.CreateItem("dup", attrs, []byte("4"), "", "", false, t0)
 	if !created || dup == id {
 		t.Error("CreateItem without replace updated an existing item")
 	}
@@ -471,7 +471,7 @@ func TestSecretsAreBoundToTheirItem(t *testing.T) {
 
 func FuzzParse(f *testing.F) {
 	c, _ := New("L", []byte("pw"), testKDF, Argon2id, t0)
-	_, _, _ = c.CreateItem("a", map[string]string{"k": "v"}, []byte("s"), "", false, t0)
+	_, _, _ = c.CreateItem("a", map[string]string{"k": "v"}, []byte("s"), "", "", false, t0)
 	good, _ := c.Marshal()
 	f.Add(good)
 	f.Add([]byte{})
@@ -493,7 +493,7 @@ func TestACloneChangesWithoutTheOriginalAndCommitsOrDiscards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, _, err := c.CreateItem("a", map[string]string{"k": "v"}, []byte("one"), "text/plain", false, t0)
+	id, _, err := c.CreateItem("a", map[string]string{"k": "v"}, []byte("one"), "text/plain", "", false, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestACloneChangesWithoutTheOriginalAndCommitsOrDiscards(t *testing.T) {
 	if err := next.SetItemAttributes(id, map[string]string{"k": "w"}, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := next.CreateItem("b", nil, []byte("two"), "text/plain", false, t0); err != nil {
+	if _, _, err := next.CreateItem("b", nil, []byte("two"), "text/plain", "", false, t0); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Search(map[string]string{"k": "v"}); len(got) != 1 || len(c.IDs()) != 1 {
@@ -555,5 +555,47 @@ func TestAVerifierTellsTheRightPasswordFromAWrongOne(t *testing.T) {
 	}
 	if _, err := c.Verifier(); !errors.Is(err, ErrLocked) {
 		t.Errorf("a locked collection's Verifier = %v, want ErrLocked", err)
+	}
+}
+
+func TestOwnersAreKeptInTheEncryptedBody(t *testing.T) {
+	c := newTestCollection(t, "pw")
+	id, _, err := c.CreateItem("a", map[string]string{"k": "v"}, []byte("s"), "", "/usr/bin/git", false, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.CreateItem("a", map[string]string{"k": "v"}, []byte("s2"), "", "/usr/bin/git", true, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetSecret(id, []byte("s3"), "", "flatpak:org.app.App", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddOwner(id, "/usr/bin/secret-tool"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddOwner(id, ""); err == nil {
+		t.Error("an owner with no name was added")
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("secret-tool")) || bytes.Contains(data, []byte("org.app.App")) {
+		t.Error("an owner is readable in the file")
+	}
+	parsed, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parsed.Unlock([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	it, err := parsed.Item(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Owner{"/usr/bin/git", "flatpak:org.app.App", "/usr/bin/secret-tool"}
+	if !slices.Equal(it.Owners, want) || !it.Owned("/usr/bin/git") || it.Owned("/usr/bin/python3") {
+		t.Errorf("owners after a round trip = %v, want %v", it.Owners, want)
 	}
 }
