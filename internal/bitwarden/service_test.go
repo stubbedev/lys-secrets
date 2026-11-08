@@ -18,8 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stubbedev/lys-lib/vaultserver"
+
 	"github.com/stubbedev/lys-secrets/vault"
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // account serves the test@bitwarden.com account: prelogin, the token

@@ -15,8 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stubbedev/lys-lib/vaultserver"
+
 	"github.com/stubbedev/lys-secrets/vault"
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // endpoints are a server's API and identity URLs.

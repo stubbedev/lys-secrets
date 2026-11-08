@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stubbedev/lys-lib/vaultserver"
+
 	"github.com/stubbedev/lys-secrets/vault"
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // fakeServer serves one handler per path and records the forms and

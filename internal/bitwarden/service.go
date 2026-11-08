@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/atomicfile"
+	"github.com/stubbedev/lys-lib/vaultserver"
 
 	"github.com/stubbedev/lys-secrets/vault"
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // session is what survives a restart on disk: the server, the account

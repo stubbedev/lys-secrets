@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stubbedev/lys-lib/vaultserver"
+
 	"github.com/stubbedev/lys-secrets/vault"
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 func keyFromB64(t *testing.T, s string) SymmetricKey {

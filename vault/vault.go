@@ -22,8 +22,7 @@ import (
 	"unicode/utf8"
 
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
-
-	"github.com/stubbedev/lys-secrets/vault/vaultserver"
+	"github.com/stubbedev/lys-lib/vaultserver"
 )
 
 // D-Bus identity.
