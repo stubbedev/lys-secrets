@@ -20,6 +20,7 @@ import (
 	"github.com/stubbedev/lys-lib/atomicfile"
 
 	"github.com/stubbedev/lys-secrets/vault"
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // session is what survives a restart on disk: the server, the account
@@ -27,7 +28,7 @@ import (
 // renews it is in the keyring, and the KDF comes from a fresh prelogin at
 // every unlock.
 type session struct {
-	Server   vault.Server
+	Server   vaultserver.Server
 	Email    string
 	ClientID string
 }
@@ -46,7 +47,7 @@ const (
 type Service struct {
 	dir       string
 	now       func() time.Time
-	newClient func(vault.Server, Device) *Client
+	newClient func(vaultserver.Server, Device) *Client
 	device    Device
 	keychain  Keychain
 
@@ -97,7 +98,7 @@ func Open(dir, deviceName string, keychain Keychain, changed func()) (*Service, 
 	}
 	s := &Service{dir: dir, now: wallClock, newClient: NewClient, device: Device{ID: id, Name: deviceName}, keychain: keychain, changed: changed, keepWake: make(chan struct{}, 1), wakeCheck: wakeCheckEvery, logf: log.Printf}
 	sess, raw, err := loadSession(filepath.Join(dir, sessionFile))
-	if errors.Is(err, vault.ErrInsecureServer) {
+	if errors.Is(err, vaultserver.ErrInsecureServer) {
 		return s.forgetInsecureSession(err)
 	}
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-secrets/vault"
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // fakeServer serves one handler per path and records the forms and
@@ -53,7 +54,7 @@ func reply(status int, body string) http.HandlerFunc {
 }
 
 func testClient(f *fakeServer) *Client {
-	server, err := vault.ParseServer(f.URL)
+	server, err := vaultserver.ParseServer(f.URL)
 	if err != nil {
 		panic(err)
 	}
@@ -229,11 +230,11 @@ func TestSync(t *testing.T) {
 // The clouds resolve to their own endpoints; a self-hosted base URL
 // puts the API and identity under it.
 func TestEndpointsOf(t *testing.T) {
-	eu, _ := vault.ParseServer(vault.CloudEU)
+	eu, _ := vaultserver.ParseServer(vaultserver.CloudEU)
 	if e := endpointsOf(eu); e.API != "https://api.bitwarden.eu" || e.Identity != "https://identity.bitwarden.eu" {
 		t.Errorf("EU cloud = %+v", e)
 	}
-	own, _ := vault.ParseServer("https://vault.example.com/")
+	own, _ := vaultserver.ParseServer("https://vault.example.com/")
 	if e := endpointsOf(own); e.API != "https://vault.example.com/api" || e.Identity != "https://vault.example.com/identity" {
 		t.Errorf("self-hosted = %+v", e)
 	}
@@ -278,7 +279,7 @@ func TestARedirectToPlainHTTPIsRefused(t *testing.T) {
 		target string
 		want   error
 	}{
-		{"off this machine", "http://vault.example.com/identity/accounts/prelogin/password", vault.ErrInsecureServer},
+		{"off this machine", "http://vault.example.com/identity/accounts/prelogin/password", vaultserver.ErrInsecureServer},
 		{"to loopback", plain.URL, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,7 +287,7 @@ func TestARedirectToPlainHTTPIsRefused(t *testing.T) {
 				http.Redirect(w, r, tc.target, http.StatusTemporaryRedirect)
 			}))
 			t.Cleanup(srv.Close)
-			server, err := vault.ParseServer(srv.URL)
+			server, err := vaultserver.ParseServer(srv.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -312,7 +313,7 @@ func TestRedirectsStayLimited(t *testing.T) {
 		http.Redirect(w, r, srv.URL+r.URL.Path, http.StatusTemporaryRedirect)
 	}))
 	t.Cleanup(srv.Close)
-	server, err := vault.ParseServer(srv.URL)
+	server, err := vaultserver.ParseServer(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

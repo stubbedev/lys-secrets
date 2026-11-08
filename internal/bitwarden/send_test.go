@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-secrets/vault"
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 func keyFromB64(t *testing.T, s string) SymmetricKey {
@@ -140,12 +141,12 @@ func TestEncryptTextSendRoundTrip(t *testing.T) {
 func TestSendURL(t *testing.T) {
 	material, _ := base64.RawURLEncoding.DecodeString(sdkSendURLKey)
 	for server, want := range map[string]string{
-		vault.CloudUS:               "https://send.bitwarden.com/#" + sdkAccessID + "/" + sdkSendURLKey,
-		vault.CloudEU:               "https://vault.bitwarden.eu/#/send/" + sdkAccessID + "/" + sdkSendURLKey,
+		vaultserver.CloudUS:         "https://send.bitwarden.com/#" + sdkAccessID + "/" + sdkSendURLKey,
+		vaultserver.CloudEU:         "https://vault.bitwarden.eu/#/send/" + sdkAccessID + "/" + sdkSendURLKey,
 		"https://vw.example.org/":   "https://vw.example.org/#/send/" + sdkAccessID + "/" + sdkSendURLKey,
 		"https://example.org/vault": "https://example.org/vault/#/send/" + sdkAccessID + "/" + sdkSendURLKey,
 	} {
-		s, err := vault.ParseServer(server)
+		s, err := vaultserver.ParseServer(server)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +154,7 @@ func TestSendURL(t *testing.T) {
 			t.Errorf("%s: %s, %v", server, got, err)
 		}
 	}
-	us, _ := vault.ParseServer(vault.CloudUS)
+	us, _ := vaultserver.ParseServer(vaultserver.CloudUS)
 	for _, bad := range []string{"", "a/b", "a#b", "a b"} {
 		if _, err := NewClient(us, Device{}).sendURL(bad, material); err == nil {
 			t.Errorf("access id %q was taken", bad)

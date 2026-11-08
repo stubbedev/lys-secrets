@@ -8,6 +8,8 @@ import (
 
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // The errors a call fails with. A Client returns them wrapped with the
@@ -22,7 +24,6 @@ var (
 	ErrNoSuchField           = errors.New("vault: the item has no such field")
 	ErrRepromptRequired      = errors.New("vault: the item asks for the master password")
 	ErrUnreachable           = errors.New("vault: the server is unreachable")
-	ErrInsecureServer        = errors.New("vault: the password hash and tokens would travel unencrypted")
 	ErrSessionNotRevoked     = errors.New("vault: logged out here, but revoking the session on the server failed, so its refresh token may still work; deauthorize the account's sessions if it may have leaked")
 	// ErrRevocationUnsupported is a logout that did all it can: the session
 	// is gone here and the server has no way to revoke it. A caller shows
@@ -85,7 +86,7 @@ var sentinels = []struct {
 	{errPrefix + "NoSuchItem", ErrNoSuchItem},
 	{errPrefix + "NoSuchField", ErrNoSuchField},
 	{errPrefix + "RepromptRequired", ErrRepromptRequired},
-	{errPrefix + "InsecureServer", ErrInsecureServer},
+	{errPrefix + "InsecureServer", vaultserver.ErrInsecureServer},
 	{errSessionNotRevoked, ErrSessionNotRevoked},
 	{errRevocationUnsupported, ErrRevocationUnsupported},
 	{errPrefix + "Unreachable", ErrUnreachable},

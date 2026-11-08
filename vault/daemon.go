@@ -8,6 +8,8 @@ import (
 
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
+
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // Host is a vault the Daemon serves. Each call blocks until done; a
@@ -136,7 +138,7 @@ func toWireLogin(r LoginRequest) wireLogin {
 }
 
 func (w wireLogin) parse() (LoginRequest, error) {
-	server, err := ParseServer(w.Server)
+	server, err := vaultserver.ParseServer(w.Server)
 	if err != nil {
 		return LoginRequest{}, err
 	}
@@ -153,7 +155,7 @@ type wireAPIKey struct {
 }
 
 func (w wireAPIKey) parse() (APIKeyRequest, error) {
-	server, err := ParseServer(w.Server)
+	server, err := vaultserver.ParseServer(w.Server)
 	if err != nil {
 		return APIKeyRequest{}, err
 	}

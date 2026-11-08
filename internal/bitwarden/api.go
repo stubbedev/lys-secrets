@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-secrets/vault"
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // endpoints are a server's API and identity URLs.
@@ -24,14 +25,14 @@ type endpoints struct {
 }
 
 var clouds = map[string]endpoints{
-	vault.CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com", Send: "https://send.bitwarden.com/#"},
-	vault.CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu", Send: "https://vault.bitwarden.eu/#/send/"},
+	vaultserver.CloudUS: {API: "https://api.bitwarden.com", Identity: "https://identity.bitwarden.com", Send: "https://send.bitwarden.com/#"},
+	vaultserver.CloudEU: {API: "https://api.bitwarden.eu", Identity: "https://identity.bitwarden.eu", Send: "https://vault.bitwarden.eu/#/send/"},
 }
 
 // endpointsOf resolves where server's account lives: an official cloud
 // by its name, a self-hosted server's API under /api and its identity
 // server under /identity.
-func endpointsOf(server vault.Server) endpoints {
+func endpointsOf(server vaultserver.Server) endpoints {
 	if cloud, ok := clouds[server.String()]; ok {
 		return cloud
 	}
@@ -77,7 +78,7 @@ type Client struct {
 }
 
 // NewClient is a client for server as device.
-func NewClient(server vault.Server, device Device) *Client {
+func NewClient(server vaultserver.Server, device Device) *Client {
 	return &Client{server: endpointsOf(server), device: device, http: &http.Client{Timeout: httpTimeout, CheckRedirect: checkRedirect}}
 }
 
@@ -88,7 +89,7 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
-	return vault.CheckTransport(req.URL)
+	return vaultserver.CheckTransport(req.URL)
 }
 
 // APIError is a server answer the flow does not handle: the operation
@@ -472,7 +473,7 @@ func (c *Client) do(req *http.Request, op string) (int, []byte, error) {
 	req.Header.Set(headerClientName, clientID)
 	req.Header.Set(headerClientVer, clientVersion)
 	resp, err := c.http.Do(req)
-	if errors.Is(err, vault.ErrInsecureServer) {
+	if errors.Is(err, vaultserver.ErrInsecureServer) {
 		return 0, nil, fmt.Errorf("bitwarden: %s: the server redirected: %w", op, err)
 	}
 	if err != nil {

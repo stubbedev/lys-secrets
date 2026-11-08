@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-secrets/vault"
+	"github.com/stubbedev/lys-secrets/vault/vaultserver"
 )
 
 // account serves the test@bitwarden.com account: prelogin, the token
@@ -96,8 +97,8 @@ func newAccount(t *testing.T) *account {
 	return a
 }
 
-func (a *account) server() vault.Server {
-	s, err := vault.ParseServer(a.srv.URL)
+func (a *account) server() vaultserver.Server {
+	s, err := vaultserver.ParseServer(a.srv.URL)
 	if err != nil {
 		a.t.Fatal(err)
 	}
@@ -995,7 +996,7 @@ func TestASessionForAPlainHTTPServerStartsLoggedOut(t *testing.T) {
 		t.Fatalf("Open = %v, want a vault that starts", err)
 	}
 	st := s.Status()
-	if st.State != vault.StateLoggedOut || !errors.Is(st.Err, vault.ErrInsecureServer) {
+	if st.State != vault.StateLoggedOut || !errors.Is(st.Err, vaultserver.ErrInsecureServer) {
 		t.Errorf("status = %+v, want logged out with ErrInsecureServer", st)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
