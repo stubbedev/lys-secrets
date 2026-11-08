@@ -1,95 +1,69 @@
 # How it works
 
-lys-secrets is a small process of its own, separate from the shell. It links no
-UI, so the code holding unlocked keys is only this. It serves two bus names:
-`org.freedesktop.secrets`, the
-[Secret Service API](https://specifications.freedesktop.org/secret-service-spec/latest/),
-and `dev.stubbe.lys.Vault1`, your Bitwarden vault.
+lys-secrets is a separate process with no UI code. It serves
+`org.freedesktop.secrets` and `dev.stubbe.lys.Vault1`, the unlock socket, and
+optionally an SSH agent. `lys-secrets pinentry` is a GnuPG pinentry.
 
-## Sharing the name
+## Bus names
 
-The process takes the vault's name first, then the Secret Service's. It never
-queues for a name and never replaces an owner.
+It claims `dev.stubbe.lys.Vault1` first, then `org.freedesktop.secrets`. It never
+queues for or replaces an owner.
 
-| Who already owns the name | What lys-secrets does |
+| Already owned | Result |
 | --- | --- |
-| Another provider owns `org.freedesktop.secrets` | Logs which one and serves the vault alone, with no unlock socket |
-| Another lys-secrets owns `dev.stubbe.lys.Vault1` | Logs that and exits |
+| `dev.stubbe.lys.Vault1` (another lys-secrets) | Logs the owner and exits |
+| `org.freedesktop.secrets` (another provider) | Logs the owner and serves only the vault: no unlock socket, no SSH agent |
 
-The user unit stops with the graphical session, and every collection and the
-vault lock as the process exits.
+The unit stops with the graphical session. Exiting locks every collection and the
+vault.
 
 ## Collections and aliases
 
-A collection is a set of items, each with a label, attributes and a secret. It
-has its own password and its own [file](/guide/security#at-rest). Clients search
-by attributes, which works on a locked collection too, so a client knows to ask
-for an unlock.
+A collection holds items, each with a label, attributes and a secret, and has its
+own password and [file](/guide/security#at-rest). Searching by attributes works on
+locked collections too.
 
-An alias names a collection. The one clients care about is `default`.
+An alias names a collection; clients use `default`. `login` is the collection your
+session password opens.
 
-`login` is the collection your session password opens. A client can also create
-collections of its own; lys-secrets asks for a new password, typed twice, and
-makes the collection's id from its label: lowercase letters and digits, the rest
-underscores. That id is the object path and the file name.
+A client-created collection asks for a new password, typed twice. Its id, used for
+the object path and file name, is the label lowercased with runs of other
+characters turned into `_` (up to 48 characters, `collection` if empty, `_2`, `_3`…
+if taken).
 
 ## Unlocking
 
-- **lys-login**, both its display manager and its lock screen, hands the password
-  it just verified to `lys-secrets` over a socket only your user can connect to.
-  The first unlock creates the `login` collection with that password, and points
-  `default` at it unless `default` is already set. Under autologin no password is
-  typed at boot, so the lock screen is the first place the password appears.
-- **`lys-secrets --unlock-fd N`** reads the password from an inherited descriptor,
-  for whatever starts the process with the password in hand. lys-login does not
-  use it.
-- **Anything else**, such as a restart, another collection or a client asking for
-  a locked item, asks through the desktop's password dialog. A wrong password asks
-  again, and cancelling leaves the collection locked.
+| Source | Behaviour |
+| --- | --- |
+| lys-login (greeter and lock screen) | Sends the verified password over the [unlock socket](/guide/security#unlock-socket). The first time, creates `login` with it and points `default` at it if unset |
+| `--unlock-fd N` | Same, from an inherited descriptor, for a launcher that has the password |
+| Anything else | Asks through the desktop's password dialog. Wrong password asks again; cancel leaves it locked |
 
-If `lys-secrets` is not running, lys-login unlocks a running gnome-keyring instead.
+A change is replied to and signalled only after it is on disk. A collection locked
+while a change is being written stays locked and holds the change.
 
-The service's lock is free while a password's key is derived and while a file is
-written, so a slow Argon2id or `fsync` holds up nobody else's search or read, and
-signals go out on their own goroutine, in order, so a stalled bus holds up nothing
-either.
+### Login password changes
 
-A change becomes visible only once it is durable: until then every other client
-reads the collection as it is on disk, and the reply and the signal come after. So
-nothing a client reads can be lost to a crash. A collection locked while one of its
-changes is being written stays locked, and holds the change when it is unlocked.
+When lys-login sends a password that does not open `login`, lys-secrets keeps it in
+locked memory and asks once for the previous password:
 
-### When your login password changes
+- **Update** opens `login` with the previous password and re-encrypts it under the
+  new one. A wrong previous password asks again.
+- **Keep the old password** leaves the file unchanged; `login` then asks for its
+  own password when needed.
 
-The `login` collection is encrypted under the password it was created with, so a new
-login password does not open it. The first time lys-login hands over a password that
-does not open it, lys-secrets keeps that password in locked memory and asks once,
-through the desktop's dialog, for your previous password:
+The kept password is zeroed when the dialog closes. A newer password replaces it
+while the dialog is open; one that opens `login` closes the dialog.
 
-- **Update** opens the collection with the previous password and re-encrypts it under
-  the new one, through the same atomic write as any other change. It stays unlocked,
-  and from then on the new password opens it at every login and unlock. A wrong
-  previous password asks again.
-- **Keep the old password** closes the dialog and leaves the file as it was, for a
-  keyring you want on a password of its own. It then asks for that password when an
-  application needs it, as any locked collection does.
+With both passwords known, `control.Rekey(path, old, new)` re-encrypts `login`
+without a dialog. It is idempotent and does nothing if `login` does not exist.
 
-Either way the new password is zeroed when the dialog closes. If another password
-arrives while the dialog is up, the newest one is used; if one opens the collection,
-the dialog goes away.
-
-A password change that knows both passwords re-encrypts the collection with no dialog,
-over the same socket lys-login unlocks through: `control.Rekey(path, old, new)` from
-the `control` package. Running it twice is safe, and with no `login` collection yet
-there is nothing to do.
-
-Any other collection keeps its own password. Change one with `ChangeLock`, then show
-the prompt it returns:
+Other collections change password through `ChangeLock` and the prompt it returns:
 
 ```sh
 busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
   org.freedesktop.Secret.Service ChangeLock o /org/freedesktop/secrets/collection/<id>
-busctl --user call org.freedesktop.secrets <the returned prompt path> \
+busctl --user call org.freedesktop.secrets <prompt path> \
   org.freedesktop.Secret.Prompt Prompt s ""
 ```
 
@@ -98,114 +72,96 @@ twice.
 
 ## Locking
 
-A collection locks when a client calls the API's `Lock` or `LockService`, or when
-the process stops. By default that is all: there is no idle time, and locking your
-screen does not lock collections. Two settings add both, each off by default:
-[`--collection-lock-after` and `--collection-lock-on-screen-lock`](/guide/configuration#command-line-flags).
-The idle time restarts when a secret is read or anything in the collection changes.
-Listing and searching do not restart it.
+| Trigger | Locks |
+| --- | --- |
+| `Lock` | The given collections; on `bitwarden`, the vault |
+| `LockService` | Every collection and the vault |
+| `--collection-lock-after` | An idle collection; reading a secret or changing anything resets the timer, listing and searching do not |
+| `--collection-lock-on-screen-lock` | Every collection when the session locks |
+| `--vault-lock-after` | The idle vault; reading a field through `Field` or a password through `bitwarden` resets the timer, listing and `NetworkLogin` do not |
+| Process exit | Everything |
 
-`Lock` on the `bitwarden` collection locks the vault. `LockService` locks every
-collection and the vault, whether or not the vault shows as a collection.
+Without the two collection flags, collections stay unlocked until one of the other
+triggers.
 
-The vault also locks after [its idle time](/guide/configuration#command-line-flags),
-which restarts when a field is read through `Field` or a password through the
-`bitwarden` collection. Listing items and `NetworkLogin` do not restart it.
+## SSH agent
 
-## The SSH agent
+With `--ssh-agent`, lys-secrets serves the SSH agent protocol on
+`$XDG_RUNTIME_DIR/lys-secrets/ssh`. It sets `SSH_AUTH_SOCK` in the systemd user
+manager and D-Bus activation environments and unsets it in systemd on exit. The Nix
+modules also export it for login shells.
 
-With `--ssh-agent` (`services.lys-secrets.sshAgent.enable`), lys-secrets also serves
-the SSH agent protocol on `$XDG_RUNTIME_DIR/lys-secrets/ssh`, in place of `ssh-agent`
-or gnome-keyring's. It sets `SSH_AUTH_SOCK` to that path in the systemd user
-manager's and D-Bus activation's environment, and takes it back from systemd when it
-stops; the Nix modules also export it for login shells.
+- **Keys:** each `~/.ssh/id_*` with a matching `.pub` (listed from the `.pub`), plus
+  keys added with `ssh-add`. Added keys live in memory only and honour `ssh-add -t`
+  and `-c` (confirmation dialog per signature). `ssh-add -x`/`-X` lock and unlock
+  the agent.
+- **Encrypted keys** are opened on first signature, using a passphrase remembered
+  in `login` if unlocked, else asking through the dialog with **Remember in the
+  login keyring** ticked. Remembered passphrases are `login` items with schema
+  `dev.stubbe.lys.SshKey` and attributes `fingerprint` and `path`.
+- **Locking `login`** drops every `~/.ssh` key the agent opened. `ssh-add` keys
+  stay until removed or expired.
 
-- **Keys** are the files `~/.ssh/id_*` with a `.pub` beside them, listed from the
-  `.pub` without opening the key, plus any added with `ssh-add`. Those live in memory
-  only, as with OpenSSH's agent, and keep `ssh-add`'s `-t` lifetime and `-c`
-  confirmation, which asks through the desktop's dialog before each signature.
-  `ssh-add -x` locks the agent and `-X` unlocks it.
-- **An encrypted key** is opened on its first signature. If the `login` collection is
-  unlocked and holds its passphrase, that is used. Otherwise the desktop's dialog asks
-  for it, with **Remember in the login keyring** ticked; a wrong passphrase asks again.
-  A remembered passphrase is an item of the `login` collection with the schema
-  `dev.stubbe.lys.SshKey` and the attributes `fingerprint` and `path`. While `login` is
-  unlocked, that key then signs with no prompt, after a restart too.
-- **Locking `login`**, by the screen, its idle lock or `LockService`, drops every key
-  of `~/.ssh` the agent opened. The next signature reads the remembered passphrase
-  again, or asks. Keys added with `ssh-add` stay until removed or expired.
-- Agent forwarding is the client's choice, as with any agent.
+## GnuPG pinentry
 
-## GnuPG passphrases
-
-`pinentry-lys` (also `lys-secrets pinentry`) is a pinentry for gpg-agent: it speaks
-the Assuan pinentry protocol on its standard input and output and asks through the
-desktop's own password dialog, so GnuPG's prompt looks like every other lys dialog.
-Point gpg-agent at it in `~/.gnupg/gpg-agent.conf`:
+`pinentry-lys` (or `lys-secrets pinentry`) speaks the Assuan pinentry protocol on
+stdin/stdout and asks through the desktop's dialog. In `~/.gnupg/gpg-agent.conf`:
 
 ```
 pinentry-program /usr/bin/pinentry-lys
 ```
 
-then `gpgconf --kill gpg-agent`. The Nix modules' `pinentry.enable` does it for you.
+then `gpgconf --kill gpg-agent`. The Nix option `pinentry.enable` does this.
 
-- When gpg-agent allows an external password cache, which it does for a key's
-  passphrase, the dialog has **Remember in the login keyring**, ticked. A remembered
-  passphrase is an item of the `login` collection with pinentry-gnome3's schema,
-  `org.gnupg.Passphrase`, and its `keygrip` attribute, so a passphrase gnome-keyring
-  kept is found as it is. While `login` is unlocked, gpg-agent then gets it with no
-  dialog, after a restart of the agent too. Unticking the box forgets it.
-- A passphrase gpg-agent says was wrong is asked again, with its reason, and never
+- When gpg-agent allows external caching, the dialog offers **Remember in the
+  login keyring** (ticked). Remembered passphrases are `login` items with
+  pinentry-gnome3's schema `org.gnupg.Passphrase` and a `keygrip` attribute, so
+  passphrases gnome-keyring stored are found. Unticking forgets it.
+- A passphrase gpg-agent reports as wrong is asked again with the reason, never
   read from the keyring.
-- A new passphrase is asked twice. Questions, such as taking a weak passphrase anyway,
-  show as a dialog with gpg-agent's buttons.
-- With no dialog host on the session bus, or no session bus at all (a text console or
-  an `ssh` session), it answers `GPG_ERR_NO_PIN_ENTRY` at once and exits, so gpg-agent
-  reports it has no pinentry instead of waiting.
+- New passphrases are asked twice; confirmations show gpg-agent's buttons.
+- Without a session bus or dialog host it answers `GPG_ERR_NO_PIN_ENTRY` at once.
 
-## Clients it is checked against
+## Clients
 
-The test suite runs the real service on a private bus against `secret-tool`,
-python-secretstorage over a DH session, Chromium's password store and git's
-libsecret credential helper. Both of the API's transports work; see
-[On the bus](/guide/security#on-the-bus).
+The test suite runs the real service against `secret-tool`, python-secretstorage
+(DH session), Chromium's password store and git's libsecret credential helper.
+Flatpak apps go through the Secret portal; lys-shell's portal stores their per-app
+master secrets in the default collection.
 
-Sandboxed (Flatpak) apps get their secret through the portal, which identifies
-them. lys-shell's Secret portal keeps their per-app master secrets through this
-service, in the default collection.
+## Bitwarden vault
 
-## The Bitwarden vault
+lys-secrets logs in to bitwarden.com, bitwarden.eu, a self-hosted server or
+Vaultwarden. lys-shell's vault dropdown, launcher mode and NetworkManager secret
+agent use it over `dev.stubbe.lys.Vault1`.
 
-lys-secrets logs in to a Bitwarden account on bitwarden.com, bitwarden.eu, a
-self-hosted server or Vaultwarden. lys-shell's vault dropdown, launcher mode and
-NetworkManager secret agent are views over it, so the one process holding the
-vault's keys is this one.
-
-It keeps [only the session](/guide/security#the-bitwarden-vault): the account on disk,
-and the credential that renews it in the Secret Service's default collection. A
-restart therefore leaves the vault locked, as Bitwarden's own clients do, and only
-the master password opens it again, with no email or second factor. An unlock
-always fetches a fresh sync from the server, so the vault cannot open offline. A
-login with a personal API key has no refresh token, so the API key itself is the
-credential kept, and an unlock logs in with it again.
+It keeps only the session: the account on disk and the renewing credential (refresh
+token, or the API key for API-key logins) in the default collection; see
+[Bitwarden vault security](/guide/security#bitwarden-vault). After a restart the
+vault is locked and opens with the master password alone. Every unlock syncs from
+the server, so the vault cannot open offline.
 
 ### `dev.stubbe.lys.Vault1`
 
-The object is `/dev/stubbe/lys/Vault`. The Go package `vault` is the contract and
-its client.
+Object `/dev/stubbe/lys/Vault`. The Go package `vault` defines the contract and a
+client.
 
-| Method | What it does |
+| Method | Effect |
 | --- | --- |
-| `Status` | State, account, whether a sync runs, the last sync, the item count and the last error |
-| `Items` | Lists the open vault: names, usernames, URIs, and which fields each item has; never a secret |
+| `Status` | State, account, sync in progress, last sync, item count, last error |
+| `Items` | Lists items: names, usernames, URIs, available fields; no secrets |
 | `Field` | One field of one item: username, password, verification code, card number, card code, email or notes |
-| `Login`, `SendLoginEmail` | Logs in with the master password, with an optional second factor or new-device code; asks the server to email that code |
-| `LoginAPIKey` | Logs in with the personal API key and opens the vault with the master password |
-| `Unlock`, `Lock`, `Logout`, `Sync` | Opens with the master password; wipes the keys; also forgets the session and [asks the server to revoke it](/guide/security#the-bitwarden-vault); refetches |
-| `NetworkLogin` | The login answering a network connection, for the secret agent |
-| `CreateLogin` | Adds a login to a folder by name, encrypted here as Bitwarden's clients do |
-| `FindLogin` | Looks up a login by its exact name |
-| `Sends`, `CreateTextSend`, `DeleteSend` | Lists your Bitwarden Sends; creates a text Send, encrypted here with Bitwarden's Send key derivation, and returns its share link with the key; deletes one |
+| `Login` | Logs in with the master password, optional second factor or new-device code |
+| `SendLoginEmail` | Asks the server to email the new-device code |
+| `LoginAPIKey` | Logs in with a personal API key and unlocks with the master password |
+| `Unlock` | Opens the vault with the master password |
+| `Lock` | Wipes the keys |
+| `Logout` | Locks, forgets the session and [asks the server to revoke it](/guide/security#bitwarden-vault) |
+| `Sync` | Refetches the vault |
+| `NetworkLogin` | The login in a folder matching a network connection's name, for the secret agent |
+| `CreateLogin` | Adds a login to a named folder, encrypted locally |
+| `FindLogin` | Looks up a login by exact name, optionally within one folder |
+| `Sends`, `CreateTextSend`, `DeleteSend` | Lists Sends; creates a text Send and returns its share link with key; deletes one |
 
-Verification codes are computed here. The signals are `Changed`, the status after
-any change, and `SyncFailed`, a periodic sync failing.
+Verification codes are computed locally. Signals: `Changed` (status after any
+change) and `SyncFailed` (a periodic sync failed).

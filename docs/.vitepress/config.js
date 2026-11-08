@@ -9,7 +9,6 @@ export default lysConfig({
       text: 'Guide',
       items: [
         { text: 'Getting started', link: '/guide/getting-started' },
-        { text: 'Install', link: '/guide/install' },
         { text: 'Configuration', link: '/guide/configuration' },
         { text: 'How it works', link: '/guide/how-it-works' },
         { text: 'How secrets are protected', link: '/guide/security' },

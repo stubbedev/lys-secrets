@@ -1,300 +1,233 @@
 # How secrets are protected
 
-lys-secrets protects secrets in a locked collection, on a disk someone else reads,
-and from other users of the machine. It does not protect an unlocked collection
-from programs you run: as with gnome-keyring, anything running as you can read it,
-unless you [confirm reads](#confirming-reads), which slows careless exfiltration
-down without stopping a determined program.
-
-This page says what each layer does and where it stops.
+lys-secrets protects locked collections, files read by someone else, and secrets
+from other users. It does not protect an unlocked collection from programs running
+as you. [Confirming reads](#confirming-reads) slows careless exfiltration; it does
+not stop a determined program.
 
 ## At rest
 
-Each collection is one file, `$XDG_DATA_HOME/lys-secrets/<id>.keyring`, mode 0600,
-in a directory created 0700. A change replaces the file whole: a temporary beside
-it is written, synced and renamed over it.
+Each collection is `$XDG_DATA_HOME/lys-secrets/<id>.keyring`, mode 0600, in a 0700
+directory. Writes go to a temporary file that is synced and renamed over the
+original.
 
-The key is derived from the password with Argon2id (3 passes over 64 MiB, 4
-threads) and a random 16-byte salt per collection. The body is encrypted with
-XChaCha20-Poly1305 under a fresh nonce.
+The key is Argon2id (3 passes, 64 MiB, 4 threads) over the password with a random
+16-byte salt per collection. The body is XChaCha20-Poly1305 with a fresh nonce.
 
-| Part of the file | Contents | Readable without the password |
+| Part | Contents | Readable without the password |
 | --- | --- | --- |
-| Header | Format magic, Argon2id parameters, salt, and a key check: an authentication tag under the key, over nothing | Yes |
+| Header | Magic, Argon2id parameters, salt, key check (an AEAD tag over nothing) | Yes |
 | Item index | Each item's numeric id and one SHA-256 hash per attribute | Yes |
-| Body | The collection's label and times; each item's label, attributes, content type, secret and times | No |
+| Body | Collection label and times; each item's label, attributes, content type, secret and times | No |
 
-The header and index are authenticated as part of the body, so changing them makes
-the file fail to open. The key check tells the two failures apart:
+Header and index are authenticated with the body.
 
-| What happened | What you get |
+| Event | Result |
 | --- | --- |
-| The password is wrong | Wrong password; the dialog asks again |
-| The body or the item index changed | The file was changed: logged, no retry, and the collection stays locked |
-| The Argon2id parameters, the salt or the key check changed | Wrong password. These decide what key the password gives, so a changed one finds no key and cannot be told apart |
+| Wrong password | Reported as wrong; the dialog asks again |
+| Body or index modified | Logged as a modified file; no retry; stays locked |
+| Argon2id parameters, salt or key check modified | Indistinguishable from a wrong password |
 
-The check gives away nothing new. Whoever holds the file can already test a password
-against the body, and it costs the same Argon2id derivation.
+The key check costs an attacker the same Argon2id derivation as testing against the
+body, so it reveals nothing new. Files in the format without a key check (magic
+version 1) still open; any modification reads as a wrong password, and the first
+unlock rewrites them with a key check.
 
-A file from before the key check opens as it stands, and any change to it reads as
-a wrong password. It is rewritten with a key check the first time it unlocks, and
-older versions of lys-secrets cannot read the rewritten file.
+Without the password, a file reveals:
 
-What someone holding the file can learn without the password:
+- **Item count**, attributes per item, and approximate content size.
+- **Guessable attribute values.** Index hashes are unkeyed, unsalted SHA-256 of
+  name and value, so `username` = `ada` can be tested offline and matched across
+  items and files. Keep secrets out of attributes.
+- **The collection id**, derived from its label, in the file name and the
+  unencrypted `aliases.json`.
 
-- **How many items there are**, how many attributes each has, and the rough size of
-  the contents.
-- **Attribute values they can guess.** The hashes are unsalted SHA-256 of the
-  attribute's name and value, with no key. Someone can test a guess such as
-  `username` = `ada` offline at full speed, and can see the same attribute on two
-  items or in two files. Do not put anything secret in an attribute. This is what
-  lets a locked collection answer a search.
-- **The collection's label, nearly.** The file name and `aliases.json` carry the
-  collection's id, made from its label, and `aliases.json` is not encrypted. The
-  label itself and everything in the items are.
-
-A collection is only as strong as its password. Nothing else, such as a hardware
-key or a key file, goes into the derivation. Changing a password re-encrypts the
-file with a fresh salt, but a copy taken earlier still opens with the old one.
+A collection is only as strong as its password; no hardware key or key file is
+mixed in. Changing the password re-encrypts with a fresh salt, but an older copy of
+the file still opens with the old password.
 
 ## While unlocked
 
-The collection key lives in its own anonymous memory mapping, outside the Go heap
-so the collector never copies it. It is excluded from core dumps and zeroed when
-the collection locks. It is locked against swap where the memlock limit allows. If
-the limit does not allow it, lys-secrets logs that once, with the limit, and keeps
-serving, and the key may reach swap. Each key takes one page, so the usual limit
-holds many. Raise `LimitMEMLOCK=` for the unit, or use encrypted or no swap, if you
-see that line.
+- The collection key is in its own anonymous mapping outside the Go heap,
+  excluded from core dumps, zeroed on lock, and `mlock`ed where `RLIMIT_MEMLOCK`
+  allows. If it does not, this is logged once with the limit; raise
+  `LimitMEMLOCK=` or use encrypted or no swap. Each key takes one page.
+- Each secret stays encrypted under that key in memory, bound to its item, and is
+  decrypted only for the request reading it; the buffer is then cleared.
+- The process sets itself non-dumpable at start and refuses to run otherwise. This
+  blocks core dumps and same-user ptrace, not root.
 
-Each secret stays encrypted in memory under that key, bound to its item so secrets
-cannot be swapped between items, and is decrypted only for the request that reads
-it. The buffer is cleared afterwards.
+Limits:
 
-The process marks itself not dumpable at start, and refuses to run if it cannot.
-That stops core dumps and another process of your user attaching to read its
-memory. It does not stop root.
-
-Where this stops:
-
-- Labels and attribute values are plain Go strings in memory while a collection is
-  unlocked. Locking drops them for the collector to reclaim; it does not overwrite
-  them.
-- The value handed to a client passes through the D-Bus library's buffers, which
-  are not cleared. Neither is a password returned by the dialog, which arrives as a
-  Go string.
-- An unlocked collection [stays unlocked](/guide/how-it-works#locking) until
-  something locks it, including while the screen is locked, unless you turn on its
-  idle lock or its lock with the screen. Locking does not stop what a client read
-  before it.
+- Labels and attribute values are plain Go strings while unlocked; locking drops
+  them without overwriting.
+- Values sent to clients pass through D-Bus library buffers, and dialog passwords
+  arrive as Go strings; neither is cleared.
+- Collections stay unlocked, including under a locked screen, unless an
+  [idle or screen lock](/guide/how-it-works#locking) is enabled. Locking does not
+  revoke what a client already read.
 
 ## On the bus
 
-The Secret Service API has **no caller check**. Every program on your session bus
-can do the following, with no prompt:
+The Secret Service API has no caller check. Any program on your session bus can,
+without a prompt:
 
-- Read every secret in an unlocked collection, unless [reads are confirmed](#confirming-reads), and in the `bitwarden` collection
-  while the vault is open.
-- See a locked collection's item paths, and search it by attribute value.
+- Read every secret in an unlocked collection (unless
+  [reads are confirmed](#confirming-reads)), and in `bitwarden` while the vault is
+  open.
+- List a locked collection's item paths and search it by attribute value.
 - Change or delete items in an unlocked collection.
-- **Delete a whole unlocked collection.** Its file is removed with no prompt and no
-  password, so keep backups of what you cannot lose.
+- **Delete an unlocked collection**, file included. Keep backups.
 - Lock anything, and move aliases between unlocked collections.
 
-A locked collection and its items cannot be changed or deleted, and an alias cannot
-move off or onto one. Such a call answers `org.freedesktop.Secret.Error.IsLocked`
-and leaves the files as they were, so the client has to unlock the collection first,
-through the `Unlock` prompt and its password. The exception is `CreateItem`, which
-returns that prompt itself and stores the item only once it succeeds.
+Changing, deleting or re-aliasing a locked collection or its items fails with
+`org.freedesktop.Secret.Error.IsLocked`, so the client must unlock first.
+`CreateItem` on a locked collection instead returns the unlock prompt and stores the
+item once it succeeds. Because `default` cannot move off a locked collection, a
+client cannot redirect new secrets away from a locked `login` to a collection it can
+read.
 
-The alias rule is stricter than gnome-keyring, which lets any client move `default`
-at any time. Without it, a client could point `default` away from the locked `login`
-collection at one it can already read, and the next secret an app saved would go
-there.
-
-A client can only open secrets over a session it opened itself, and its sessions
-close when it leaves the bus.
+Secrets are only returned over a session the caller opened; its sessions close when
+it leaves the bus.
 
 ### Confirming reads
 
-With `--confirm-foreign-reads`, each item remembers its owners: the programs that
-stored or changed it, and those you always allowed. They are kept in the encrypted
-body, not the readable index. A program reading an item it does not own sees the item
-as locked: a search lists it among the locked items and a read returns nothing, so
-libsecret asks to unlock it, and that `Unlock` prompt shows a dialog naming the
-program, its path, the item, its keyring and its owners:
+With `--confirm-foreign-reads`, each item records its owners (programs that stored
+or changed it, and programs always allowed) inside the encrypted body. A
+non-owner sees the item as locked: searches list it as locked and reads return
+nothing. Its `Unlock` prompt shows a dialog naming the program, its path, the item,
+its collection and its owners:
 
-| Answer | What happens |
+| Answer | Effect |
 | --- | --- |
-| **Deny** | The prompt completes dismissed and the program reads nothing |
-| **Allow** | That program's bus connection may read the item until it leaves the bus or the collection locks |
-| **Always allow** (the checkbox) | The program joins the item's owners, and reads it unasked from then on, across restarts |
+| **Deny** | Prompt dismissed; nothing read |
+| **Allow** | That bus connection may read the item until it disconnects or the collection locks |
+| **Always allow** | The program becomes an owner and reads unasked, across restarts |
 
-A program is its executable's path, from `/proc/<pid>/exe` of the process the bus
-names; a Flatpak app is its app id, from its `.flatpak-info`. Where the bus hands over
-a pidfd (dbus-broker), lys-secrets checks the process still lives after naming it, so a
-reused pid cannot pass as another program. A program that cannot be named, such as one
-that made itself undumpable, can be allowed only for its connection.
+A program is identified by `/proc/<pid>/exe`, or by app id from `.flatpak-info` for
+Flatpak apps. When the bus provides a pidfd (dbus-broker), the process is checked to
+still be alive after identification, so a reused pid cannot impersonate. An
+unidentifiable program can only be allowed per connection. An item with no owners
+is claimed by its first reader without a dialog, and this is logged.
 
-Items stored before owners were kept have none. Their first reader becomes the owner
-without a dialog, and the log says so.
+Limits:
 
-Where this stops:
-
-- An interpreter is one program: every Python script or Node package you run is
-  `python3` or `node`, so allowing one allows all of them.
-- A program running as you can attach to an allowed program, or replace a binary it
-  can write, and read through it. This is a speed bump against careless exfiltration,
-  such as a package's install script enumerating the keyring, not a sandbox.
-- Labels and attributes are not covered: any client still searches, and reads them
-  from the item's properties.
+- An interpreter is one program: allowing `python3` allows every Python script.
+- A program running as you can attach to or replace an allowed program.
+- Labels and attributes remain readable by any client.
 - The `bitwarden` collection is not covered.
-- With the flag off, a read asks the bus nothing; storing an item still records who
-  stored it, so turning the flag on later knows the owners.
+- With the flag off, reads are not checked, but stores still record owners.
 
-An app in a sandbox should go through the portal. One allowed to talk to
-`org.freedesktop.secrets` directly gets the same access as any other client.
+Sandboxed apps should use the Secret portal; one with direct access to
+`org.freedesktop.secrets` is an ordinary client.
 
 ### Transports
 
-| Algorithm | What it does |
+| Algorithm | Effect |
 | --- | --- |
-| `plain` | The secret travels as is |
-| `dh-ietf1024-sha256-aes128-cbc-pkcs7` | AES-128-CBC under an HKDF-SHA256 key from an unauthenticated 1024-bit Diffie-Hellman exchange, with a fresh IV per secret |
+| `plain` | Secret sent as is |
+| `dh-ietf1024-sha256-aes128-cbc-pkcs7` | AES-128-CBC under an HKDF-SHA256 key from an unauthenticated 1024-bit Diffie-Hellman exchange; fresh IV per secret |
 
-These are the transports the specification names, and the client chooses.
-Neither is a security boundary. The DH transport keeps a secret out of a bus log,
-and does not prove who is on the other end. lys-secrets' own Go `client` package
-uses `plain`.
+The client chooses. Neither is a security boundary: DH keeps secrets out of bus
+logs but authenticates nobody.
 
 ### Passwords on the bus
 
-- Passwords typed into a dialog cross the session bus in the clear, from the dialog
-  host back to lys-secrets. Only the process owning
-  `dev.stubbe.lys.PortalDialogs1` is asked, and lys-secrets checks nothing else
-  about who that is. The client that triggered the prompt never receives the
-  password.
-- The Bitwarden master password crosses the bus on `Login`, `LoginAPIKey`, `Unlock`
-  and a reprompted `Field`.
+- Dialog passwords travel in the clear from the owner of
+  `dev.stubbe.lys.PortalDialogs1` to lys-secrets; nothing else about that owner is
+  checked. The client that triggered the prompt never sees the password.
+- The Bitwarden master password travels on `Login`, `LoginAPIKey`, `Unlock` and a
+  reprompted `Field`.
 
-## The unlock socket
+## Unlock socket
 
-lys-login hands over the login password through
-`$XDG_RUNTIME_DIR/lys-secrets/control`, so this password does not cross D-Bus. The
-socket is in a 0700 directory, and the server refuses a peer whose `SO_PEERCRED` uid
-is not yours. Any program running as you can still connect and try a password; a
-try costs one Argon2id derivation, with no other limit.
+lys-login sends the login password over `$XDG_RUNTIME_DIR/lys-secrets/control`, not
+D-Bus. The socket is in a 0700 directory and refuses peers whose `SO_PEERCRED` uid
+differs. Any program running as you can connect and try passwords at one Argon2id
+derivation each, with no other limit.
 
-A password that does not open the `login` collection is kept, in locked memory like
-a collection key, only while the dialog asking for your previous password is up, and
-is zeroed when it closes. A program running as you can make that dialog appear by
-sending any password; it cannot read the collection through it. The same socket's
-re-key request needs the current password of the `login` collection (or the new one,
-when it is re-keyed already), so it cannot take a collection over either.
+A password that does not open `login` is held in locked memory only while the
+previous-password dialog is open. Any same-user program can trigger that dialog but
+cannot read `login` through it. A re-key request needs the current (or already new)
+password of `login`.
 
-## The SSH agent
+## SSH agent
 
-The agent's socket, `$XDG_RUNTIME_DIR/lys-secrets/ssh`, is in the same 0700 directory
-as the unlock socket, and refuses a peer whose `SO_PEERCRED` uid is not yours. Any
-program running as you can use it to sign with any listed key, as with every SSH
-agent; add a key with `ssh-add -c` to confirm each signature.
+The agent socket, `$XDG_RUNTIME_DIR/lys-secrets/ssh`, shares the 0700 directory and
+`SO_PEERCRED` check. Any program running as you can sign with any listed key, as
+with every agent; use `ssh-add -c` for per-signature confirmation.
 
-A decrypted key lives in locked memory like a collection key: off the Go heap, locked
-against swap where the memlock limit allows, excluded from core dumps, and zeroed when
-it is dropped. An Ed25519 key signs straight from there, with lys-secrets' own
-implementation of the signature, since Go's keeps an expanded copy of each key on the
-heap; every secret it derives stays in locked memory or on the stack. Where this stops:
+Decrypted keys live in locked memory like collection keys. Ed25519 keys sign
+directly from there with lys-secrets' own signing code, keeping derived secrets in
+locked memory or on the stack. Limits:
 
-- An RSA or ECDSA key is kept in locked memory as PKCS #8, and parsed onto the Go heap
-  for each signature, because Go signs only with its own key types. Its private numbers
-  are zeroed afterwards, but Go's internal copies of them are not.
-- Opening an encrypted key file passes the decrypted key through the SSH library's heap
-  buffers once, before it is moved into locked memory. A key `ssh-add` sends arrives the
-  same way.
-- The passphrase you type crosses the session bus from the dialog host, as every
-  password typed into a dialog does, and arrives as a Go string.
+- RSA and ECDSA keys are stored as PKCS #8 in locked memory and parsed onto the Go
+  heap for each signature; their private numbers are zeroed afterwards, Go's
+  internal copies are not.
+- Decrypting a key file, or receiving a key from `ssh-add`, passes it through the
+  SSH library's heap buffers once.
+- Typed passphrases cross the session bus from the dialog host and arrive as Go
+  strings.
 
-## The GnuPG pinentry
+## GnuPG pinentry
 
-`pinentry-lys` marks itself undumpable, as the service does. The passphrase it hands
-gpg-agent is written in lines it clears afterwards, and is never logged. It crosses
-the session bus from the dialog host as every typed password does, and a remembered
-one crosses it again from the Secret Service, over a plain session, on each use.
+`pinentry-lys` is non-dumpable. The passphrase sent to gpg-agent is written from
+buffers cleared afterwards and never logged. It crosses the session bus from the
+dialog host, and a remembered one crosses it from the Secret Service over a plain
+session on each use.
 
-## The Bitwarden vault
+## Bitwarden vault
 
-**On disk**, the vault directory `$XDG_STATE_HOME/lys-secrets/bitwarden` is created
-mode 0700 and its files are 0600. It holds `device-id` and `session.json`, which holds the
-server, the email and the OAuth client id. Nothing secret: never the refresh token,
-the API key, the master password, a key or an item.
+**On disk:** `$XDG_STATE_HOME/lys-secrets/bitwarden` is 0700, its files 0600. It
+holds `device-id` and `session.json` (server, email, OAuth client id). No refresh
+token, API key, master password, key or item.
 
-**In the keyring**, the credential that renews the session is one item of the Secret
-Service's default collection (the `login` collection unless you pointed `default`
-elsewhere), with the schema `dev.stubbe.lys.Vault.Session` and the server and email as
-its attributes. It is the refresh token of a password login, or the API key's client
-secret of an API key login, which Bitwarden issues no refresh token for. It is
-encrypted at rest like every other secret there. Whoever reads it from an unlocked
-collection can use it against the server, to get a token and your vault as the server
-stores it, still encrypted under your master password. The vault reads it at the first
-unlock after a restart; a locked collection asks for its password first, through the
-same dialog as any other client's request.
+**In the keyring:** the renewing credential is one item in the default collection
+with schema `dev.stubbe.lys.Vault.Session` and server and email as attributes. It is
+the refresh token, or the API key's client secret for API-key logins. Anyone who
+reads it from an unlocked collection can get tokens and the server's copy of your
+vault, still encrypted under your master password. The first unlock after a restart
+reads it, prompting for the collection's password if locked.
 
-`Logout` deletes the file and the keyring item first, then asks the server to revoke
-the refresh token through OAuth's revocation endpoint (RFC 7009). Both go whatever the
-server answers.
+**Logout** deletes the file and keyring item, then asks the server to revoke the
+refresh token (RFC 7009), regardless of the answer:
 
-**On Bitwarden's and Vaultwarden's servers, logging out does not end the session on
-the server.** They have no revocation endpoint today, so the refresh token stays
-valid until it expires or the account's sessions are deauthorized. A copy of the
-refresh token read earlier keeps working until then. lys-secrets logs this once
-and answers `RevocationUnsupported`, which is the expected result on these servers,
-not a failure.
-
-To end it, deauthorize the account's sessions, which is "Deauthorize sessions" on
-Bitwarden. Do that if the file may have leaked. It needs your master password and
-logs out every device on the account, so lys-secrets never does it for you.
-
-| What the server answers | What `Logout` returns |
+| Server answer | `Logout` returns |
 | --- | --- |
-| 200 | Success: the token is revoked |
-| 404, 405, 501, or `unsupported_token_type` | `RevocationUnsupported`: the server has no way to revoke it |
-| Anything else, or no answer | `SessionNotRevoked`, saying why: revocation was tried and failed, so the token may still work |
+| 200 | Success |
+| 404, 405, 501, or 400 `unsupported_token_type` | `RevocationUnsupported` |
+| Anything else, or no answer | `SessionNotRevoked`, with the reason |
 
-A session from a personal API key has no refresh token to revoke; its access token
-stops working when it expires, and the API key keeps working until you rotate it in
-Bitwarden's settings.
+**Bitwarden's and Vaultwarden's servers have no revocation endpoint**, so logout
+returns `RevocationUnsupported` (logged once) and the refresh token stays valid
+until it expires or you use Bitwarden's "Deauthorize sessions", which logs out every
+device and which lys-secrets never does for you. Do that if the token may have
+leaked. API-key sessions have no refresh token; the API key works until rotated.
 
-**In memory**, unlike a collection's key, the vault's keys and decrypted items are
-on the Go heap, with no lock against swap. They are excluded from core dumps only by
-the process being not dumpable. Locking zeroes the key bytes the client still holds
-and drops the access token and the items. Items are Go strings: they are dropped for
-the collector to reclaim, not overwritten, and the collector may have copied a key
-before it was zeroed.
+**In memory:** vault keys and decrypted items are on the Go heap, not `mlock`ed,
+protected from dumps only by the process being non-dumpable. Locking zeroes the key
+bytes and drops the access token and items; items are Go strings and are not
+overwritten, and the collector may have copied keys before zeroing.
 
-**Who can read it.** Each `dev.stubbe.lys.Vault1` call first checks that the caller
-runs as your uid. That keeps other users out, and does not separate your own
-programs from each other.
+**Access:** every `dev.stubbe.lys.Vault1` call checks the caller runs as your uid.
+That excludes other users, not your own programs.
 
 - `Items` carries no secret.
-- `Field` gives out one value at a time. An item behind Bitwarden's master password
-  reprompt gives its secret fields only with the master password, checked here.
-  Usernames and emails are not behind it.
-- `NetworkLogin` gives a login's username, password and all its custom fields
-  together, with no prompt, but refuses an item behind the reprompt, one not fully
-  decrypted, or a name that matches more than one login.
+- `Field` returns one value at a time. Secret fields of a reprompt item require the
+  master password, checked locally; usernames and emails do not.
+- `NetworkLogin` returns username, password and all custom fields without a prompt,
+  but refuses reprompt items, items not fully decrypted, and names matching more
+  than one login.
 - The [`bitwarden` collection](/guide/configuration#the-bitwarden-collection) has no
-  uid check of its own; see [On the bus](#on-the-bus). Reprompted logins are left
-  out of it.
+  uid check (see [On the bus](#on-the-bus)) and omits reprompt items.
 
-**To the server.** The password itself is never sent; the server gets a hash derived
-from the master key. The account's KDF settings come from the server, so
-lys-secrets refuses ones under Bitwarden's floors: PBKDF2 under 5000 iterations, or
-Argon2id under 2 iterations, 16 MiB or 1 thread. Authenticated items are checked
-with HMAC-SHA256 before they are decrypted.
+**Server:** the master password is never sent, only a hash derived from the master
+key. KDF settings from the server below Bitwarden's floors are refused: PBKDF2 under
+5000 iterations, Argon2id under 2 iterations, 16 MiB or 1 thread. Authenticated
+items are verified with HMAC-SHA256 before decryption.
 
-Requests use Go's standard TLS verification and a 30-second timeout. A self-hosted
-server's URL must be `https://`, because the password hash and the tokens would
-otherwise travel unencrypted. `http://` is accepted only for `localhost` and
-loopback addresses, and a redirect from the server to plain HTTP elsewhere is
-refused. A session saved for an `http://` server from before this rule is deleted
-at start, and the vault starts logged out and says why.
+Requests use Go's standard TLS verification and a 30-second timeout. Self-hosted
+URLs must be `https://`; `http://` is accepted only for `localhost` and loopback
+addresses, and redirects to plain HTTP elsewhere are refused. A saved session for a
+server that fails this rule is deleted at start and the vault starts logged out with
+the reason as its status.
