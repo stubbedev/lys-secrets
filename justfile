@@ -20,11 +20,11 @@ lint:
 # Run the test suite in a random order, so a test that leans on state an
 # earlier one left behind fails instead of passing by declaration order.
 test *args:
-    go test -shuffle=on ./... {{args}}
+    go test ${LYS_TEST_ARGS--shuffle=on} ./... {{args}}
 
 # Run the test suite under the race detector, which needs cgo.
 race:
-    CGO_ENABLED=1 go test -race -shuffle=on ./...
+    CGO_ENABLED=1 go test -race ${LYS_TEST_ARGS--shuffle=on} ./...
 
 # Compile-check every package; the output is discarded.
 build:
