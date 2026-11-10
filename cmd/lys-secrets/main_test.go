@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbustest"
+	"github.com/stubbedev/lys-lib/logind"
+	"github.com/stubbedev/lys-lib/logind/logindtest"
 	"github.com/stubbedev/lys-lib/portaldialogs"
 	"github.com/stubbedev/lys-lib/sockdir"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
@@ -254,12 +256,6 @@ func TestAnotherProviderKeepsTheName(t *testing.T) {
 	}
 }
 
-type fakeLogind struct{}
-
-func (fakeLogind) GetSession(string) (dbus.ObjectPath, *dbus.Error) {
-	return "/org/freedesktop/login1/session/_1", nil
-}
-
 func loginLocked(t *testing.T) bool {
 	t.Helper()
 	conn, err := dbus.ConnectSessionBus()
@@ -278,34 +274,20 @@ func loginLocked(t *testing.T) bool {
 	return locked
 }
 
-func TestCollectionsLockWithTheScreen(t *testing.T) {
-	setup(t)
-	system := dbustest.Start(t)
-	system.UseAsSystemBus(t)
-	owner := system.Conn(t)
-	if err := owner.Export(fakeLogind{}, "/org/freedesktop/login1", "org.freedesktop.login1.Manager"); err != nil {
-		t.Fatal(err)
-	}
-	if reply, err := owner.RequestName("org.freedesktop.login1", dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
-		t.Fatalf("own logind's name on the private bus: %v, %v", reply, err)
-	}
-
-	d := start(t, "login-pw", "--collection-lock-on-screen-lock")
-	d.waitLog(t, "serving org.freedesktop.secrets")
-	if loginLocked(t) {
-		t.Fatal("locked before the screen did")
-	}
+func lockUntilLocked(t *testing.T, how string, lock func()) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for !loginLocked(t) {
 		if time.Now().After(deadline) {
-			t.Fatal("the collection did not lock with the screen")
+			t.Fatalf("the collection did not lock on %s", how)
 		}
-		if err := owner.Emit("/org/freedesktop/login1/session/_1", "org.freedesktop.login1.Session.Lock"); err != nil {
-			t.Fatal(err)
-		}
+		lock()
 		time.Sleep(20 * time.Millisecond)
 	}
+}
 
+func unlockWithTheLockScreen(t *testing.T) {
+	t.Helper()
 	sock, err := control.SocketPath(xdg.OS)
 	if err != nil {
 		t.Fatal(err)
@@ -315,6 +297,44 @@ func TestCollectionsLockWithTheScreen(t *testing.T) {
 	}
 	if loginLocked(t) {
 		t.Error("the lock screen's password did not reopen the collection")
+	}
+}
+
+func TestCollectionsLockWithTheScreen(t *testing.T) {
+	setup(t)
+	const display logind.SessionID = "1"
+	fake := logindtest.StartUnit(t, logindtest.Config{Display: display})
+
+	d := start(t, "login-pw", "--collection-lock-on-screen-lock")
+	d.waitLog(t, "serving org.freedesktop.secrets")
+	if loginLocked(t) {
+		t.Fatal("locked before the screen did")
+	}
+	lockUntilLocked(t, "logind's Lock", func() { fake.Lock(t, display) })
+	unlockWithTheLockScreen(t)
+
+	lockUntilLocked(t, "LockedHint turning true", func() { fake.SetLockedHint(t, display, true) })
+	unlockWithTheLockScreen(t)
+}
+
+func TestOnlyALockOrTheLockedHintLocksTheCollections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		event logind.Event
+		want  bool
+	}{
+		{logind.Locked{}, true},
+		{logind.LockedHintChanged{Locked: true}, true},
+		{logind.LockedHintChanged{Locked: false}, false},
+		{logind.Unlocked{}, false},
+		{logind.ActiveChanged{Active: false}, false},
+		{logind.Sleep{Start: true}, false},
+		{nil, false},
+	}
+	for _, tc := range tests {
+		if got := sessionLocked(tc.event); got != tc.want {
+			t.Errorf("sessionLocked(%#v) = %v, want %v", tc.event, got, tc.want)
+		}
 	}
 }
 

@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbusx"
+	"github.com/stubbedev/lys-lib/logind"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 	"github.com/stubbedev/lys-lib/xdg"
 	"golang.org/x/sys/unix"
@@ -57,7 +58,6 @@ import (
 	"github.com/stubbedev/lys-secrets/internal/bitwarden"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
 	"github.com/stubbedev/lys-secrets/internal/prompt"
-	"github.com/stubbedev/lys-secrets/internal/screenlock"
 	"github.com/stubbedev/lys-secrets/internal/service"
 	"github.com/stubbedev/lys-secrets/internal/sshagent"
 	"github.com/stubbedev/lys-secrets/internal/usersock"
@@ -291,17 +291,52 @@ func exportEnv(conn *dbus.Conn, name, value string) (unexport func()) {
 // until ctx ends. Not being able to watch does not stop the service, whose
 // secrets every app needs, and the log says what it means.
 func lockOnScreenLock(ctx context.Context, svc *service.Service) {
-	conn, err := dbus.ConnectSystemBus()
-	if err == nil {
-		defer func() { _ = conn.Close() }()
-		err = screenlock.Watch(ctx, conn, func() {
-			svc.LockCollections()
-			log.Print("lys-secrets: the session locked, so every collection did")
-		})
-	}
-	if err != nil {
+	if err := watchScreenLock(ctx, svc); err != nil {
 		log.Printf("lys-secrets: collections will NOT lock with the screen, despite --collection-lock-on-screen-lock: %v", err)
 	}
+}
+
+// watchScreenLock locks svc's collections on each Lock logind sends the
+// session, as for `loginctl lock-session`, and each time its LockedHint
+// turns true, as a lock screen such as lys-login's sets it, until ctx
+// ends or the system bus goes away. The session is logind's auto one:
+// a user unit is in none, so it is the user's display session.
+func watchScreenLock(ctx context.Context, svc *service.Service) error {
+	conn, err := logind.Dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	session, err := logind.NewManager(conn).GetSession(ctx, logind.AutoSession)
+	if err != nil {
+		return err
+	}
+	w, err := session.Watch(ctx, func(e logind.Event, err error) {
+		if err != nil {
+			log.Printf("lys-secrets: %v", err)
+			return
+		}
+		if !sessionLocked(e) {
+			return
+		}
+		svc.LockCollections()
+		log.Print("lys-secrets: the session locked, so every collection did")
+	})
+	if err != nil {
+		return err
+	}
+	<-w.Done()
+	return w.Stop()
+}
+
+func sessionLocked(e logind.Event) bool {
+	switch e := e.(type) {
+	case logind.Locked:
+		return true
+	case logind.LockedHintChanged:
+		return e.Locked
+	}
+	return false
 }
 
 // serveVault opens the Bitwarden vault whose session lives in dir and
