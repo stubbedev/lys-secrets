@@ -159,7 +159,7 @@ func (c *Client) Watch(ctx context.Context, w Watcher) error {
 	signals := make(chan *dbus.Signal, 16)
 	c.conn.Signal(signals)
 	appeared := make(chan struct{}, 1)
-	stopOwner, err := dbusx.WatchOwner(ctx, c.conn, ServiceName, func() {
+	stopOwner, err := dbusx.WatchOwner(ctx, c.conn, ServiceName, func(dbus.Sequence) {
 		select {
 		case appeared <- struct{}{}:
 		default:
