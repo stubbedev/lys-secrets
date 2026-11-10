@@ -91,12 +91,12 @@ func (l *Listener) Serve(ctx context.Context, name string, handle func(*net.Unix
 }
 
 func (l *Listener) own(conn *net.UnixConn) error {
-	uid, err := peercred.UID(conn)
+	peer, err := peercred.Of(conn)
 	if err != nil {
 		return err
 	}
-	if int(uid) != l.uid {
-		return fmt.Errorf("peer uid %d is not this user's %d", uid, l.uid)
+	if int(peer.UID) != l.uid {
+		return fmt.Errorf("peer uid %d is not this user's %d", peer.UID, l.uid)
 	}
 	return nil
 }
