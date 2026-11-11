@@ -149,8 +149,12 @@ type Service struct {
 	closed bool
 	// stops undo, in reverse, what Start set up beyond the collections,
 	// aliases, vault, sessions and prompts: the root object, the
-	// missing-collection subtrees, the owner watch and the bus name.
+	// missing-collection subtrees, the watch of clients leaving and the
+	// bus name.
 	stops []func()
+	// leavers is the watch of clients leaving the bus, nil until Start
+	// has set it up.
+	leavers *dbusx.Watch
 	// vault is the vault collection, nil unless Config.Vault shows as one.
 	vault *vaultColl
 	// idle is the pending check of Config.LockAfter, nil with no collection
@@ -225,10 +229,13 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 		s.colls[id] = &collection{id: id, kr: kr, items: map[uint32]func(){}}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.serveLocked(); err != nil {
+	err = s.serveLocked()
+	if err != nil {
 		s.withdrawLocked()
-		return nil, err
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return nil, errors.Join(err, s.stopWatchingLeavers())
 	}
 	return s, nil
 }
@@ -266,7 +273,7 @@ func (s *Service) serveLocked() error {
 			return fmt.Errorf("the vault collection: %w", err)
 		}
 	}
-	if err := s.watchOwners(); err != nil {
+	if err := s.watchLeavers(); err != nil {
 		return err
 	}
 	release, err := dbusx.Own(s.conn, BusName)
@@ -277,8 +284,8 @@ func (s *Service) serveLocked() error {
 	return nil
 }
 
-// withdrawLocked gives up the bus name, stops the owner watch and
-// unexports every object the service put on its connection.
+// withdrawLocked gives up the bus name, cancels the watch of clients
+// leaving and unexports every object the service put on its connection.
 func (s *Service) withdrawLocked() {
 	for _, stop := range slices.Backward(s.stops) {
 		stop()
@@ -317,6 +324,11 @@ func (s *Service) Close() {
 		return
 	}
 	defer s.signals.drain(time.After(signalDrainWait))
+	defer func() {
+		if err := s.stopWatchingLeavers(); err != nil {
+			log.Printf("secrets: %v", err)
+		}
+	}()
 	defer s.mu.Unlock()
 	s.closed = true
 	s.dropRekey()
@@ -854,59 +866,65 @@ func (s *Service) lockCollectionLocked(c *collection) {
 	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
 }
 
-// watchOwners closes a client's sessions when it leaves the bus, until
-// the stop it adds to s.stops runs.
-func (s *Service) watchOwners() error {
-	match := []dbus.MatchOption{
-		dbus.WithMatchSender("org.freedesktop.DBus"),
-		dbus.WithMatchInterface("org.freedesktop.DBus"),
-		dbus.WithMatchMember("NameOwnerChanged"),
-	}
-	if err := s.conn.AddMatchSignal(match...); err != nil {
+const (
+	messageBus = "org.freedesktop.DBus"
+	busPath    = dbus.ObjectPath("/org/freedesktop/DBus")
+)
+
+type ownerChange struct {
+	Name     string `dbus:"name"`
+	OldOwner string `dbus:"old_owner"`
+	NewOwner string `dbus:"new_owner"`
+}
+
+var nameOwnerChanged = dbusx.NewSignal[ownerChange](messageBus, "NameOwnerChanged")
+
+// watchLeavers closes a client's sessions when it leaves the bus. The
+// stop it adds to s.stops only cancels the watch, since its handler
+// takes s.mu, which the stops run under; stopWatchingLeavers, called
+// without s.mu, waits for it to end.
+func (s *Service) watchLeavers() error {
+	watching, cancel := context.WithCancel(context.Background())
+	w, err := dbusx.WatchSignals(watching, s.conn, dbusx.FromBus(),
+		func(err error) { log.Printf("secrets: watch bus clients: %v", err) },
+		dbusx.On(nameOwnerChanged, busPath, s.closeSessionsOfLeaver))
+	if err != nil {
+		cancel()
 		return fmt.Errorf("watch bus clients: %w", err)
 	}
-	signals := make(chan *dbus.Signal, 64)
-	done := make(chan struct{})
-	s.conn.Signal(signals)
-	s.stops = append(s.stops, func() {
-		s.conn.RemoveSignal(signals)
-		_ = s.conn.RemoveMatchSignal(match...)
-		close(done)
-	})
-	go s.closeSessionsOfLeavers(signals, done)
+	s.leavers = w
+	s.stops = append(s.stops, cancel)
 	return nil
 }
 
-func (s *Service) closeSessionsOfLeavers(signals <-chan *dbus.Signal, done <-chan struct{}) {
-	for {
-		var sig *dbus.Signal
-		select {
-		case <-done:
-			return
-		case got, ok := <-signals:
-			if !ok {
-				return
-			}
-			sig = got
-		}
-		if sig.Name != "org.freedesktop.DBus.NameOwnerChanged" || len(sig.Body) != 3 {
-			continue
-		}
-		name, _ := sig.Body[0].(string)
-		newOwner, _ := sig.Body[2].(string)
-		if newOwner != "" || !strings.HasPrefix(name, ":") {
-			continue
-		}
-		s.peers.forget(name)
-		s.mu.Lock()
-		for path, sess := range s.sessions {
-			if sess.owner == name {
-				s.closeSessionLocked(path)
-			}
-		}
-		delete(s.grants, name)
-		s.mu.Unlock()
+// stopWatchingLeavers waits for the watch of clients leaving, cancelled
+// by withdrawLocked, to end. The caller does not hold s.mu.
+func (s *Service) stopWatchingLeavers() error {
+	if s.leavers == nil {
+		return nil
 	}
+	if err := s.leavers.Stop(); err != nil && !errors.Is(err, dbusx.ErrDisconnected) {
+		return fmt.Errorf("stop watching bus clients: %w", err)
+	}
+	return nil
+}
+
+// closeSessionsOfLeaver closes the sessions of a connection that left
+// the bus, and forgets what it was allowed and who it was.
+func (s *Service) closeSessionsOfLeaver(change ownerChange, _ dbus.Sequence) error {
+	if change.NewOwner != "" || !strings.HasPrefix(change.Name, ":") {
+		return nil
+	}
+	s.peers.forget(change.Name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for path, sess := range s.sessions {
+		if sess.owner == change.Name {
+			s.closeSessionLocked(path)
+		}
+	}
+	delete(s.grants, change.Name)
+	return nil
 }
 
 func (s *Service) closeSessionLocked(path dbus.ObjectPath) {
