@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/transport"
@@ -191,37 +193,69 @@ func (c *Client) Delete(ctx context.Context, attrs map[string]string) error {
 	return nil
 }
 
-// prompt shows a provider prompt and waits for its Completed; a dismissed
-// prompt is ErrDismissed, and ctx ending dismisses it.
-func (c *Client) prompt(ctx context.Context, path dbus.ObjectPath) (dbus.Variant, error) {
-	match := []dbus.MatchOption{dbus.WithMatchObjectPath(path), dbus.WithMatchInterface(ifacePrompt), dbus.WithMatchMember("Completed")}
-	if err := c.conn.AddMatchSignalContext(ctx, match...); err != nil {
+// dismissTimeout bounds dismissing a prompt whose caller gave up on it.
+const dismissTimeout = 5 * time.Second
+
+type completion struct {
+	Dismissed bool         `dbus:"dismissed"`
+	Result    dbus.Variant `dbus:"result"`
+}
+
+var promptCompleted = dbusx.NewSignal[completion](ifacePrompt, "Completed")
+
+// prompt shows a provider prompt and waits for its Completed, which
+// only the provider owning the Secret Service's name is heard sending;
+// a dismissed prompt is ErrDismissed, and ctx ending dismisses it.
+func (c *Client) prompt(ctx context.Context, path dbus.ObjectPath) (result dbus.Variant, err error) {
+	completed := make(chan completion, 1)
+	unread := make(chan error, 1)
+	w, err := dbusx.WatchSignals(ctx, c.conn, dbusx.FromOwner(busName),
+		func(err error) {
+			select {
+			case unread <- err:
+			default:
+			}
+		},
+		dbusx.On(promptCompleted, path, func(v completion, _ dbus.Sequence) error {
+			select {
+			case completed <- v:
+				return nil
+			default:
+				return errors.Join(fmt.Errorf("prompt %s completed twice", path), dbus.CloseFDs([]any{v.Result}))
+			}
+		}))
+	if err != nil {
 		return dbus.Variant{}, fmt.Errorf("watch the prompt: %w", err)
 	}
-	defer func() { _ = c.conn.RemoveMatchSignal(match...) }()
-	signals := make(chan *dbus.Signal, 8)
-	c.conn.Signal(signals)
-	defer c.conn.RemoveSignal(signals)
+	defer func() {
+		if serr := w.Stop(); serr != nil && !errors.Is(serr, dbusx.ErrDisconnected) {
+			err = errors.Join(err, fmt.Errorf("stop watching the prompt: %w", serr))
+		}
+	}()
 	obj := c.conn.Object(busName, path)
 	if err := obj.CallWithContext(ctx, ifacePrompt+".Prompt", 0, "").Err; err != nil {
 		return dbus.Variant{}, fmt.Errorf("show the prompt: %w", err)
 	}
-	for {
-		select {
-		case <-ctx.Done():
-			_ = obj.Call(ifacePrompt+".Dismiss", 0).Err
-			return dbus.Variant{}, ctx.Err()
-		case sig := <-signals:
-			if sig.Path != path || sig.Name != ifacePrompt+".Completed" || len(sig.Body) != 2 {
-				continue
-			}
-			if dismissed, _ := sig.Body[0].(bool); dismissed {
-				return dbus.Variant{}, ErrDismissed
-			}
-			result, _ := sig.Body[1].(dbus.Variant)
-			return result, nil
+	select {
+	case <-ctx.Done():
+	case err := <-unread:
+		return dbus.Variant{}, fmt.Errorf("the prompt's answer: %w", err)
+	case <-w.Done():
+		if ctx.Err() == nil {
+			return dbus.Variant{}, fmt.Errorf("wait for the prompt: %w", w.Stop())
 		}
+	case v := <-completed:
+		if v.Dismissed {
+			return dbus.Variant{}, errors.Join(ErrDismissed, dbus.CloseFDs([]any{v.Result}))
+		}
+		return v.Result, nil
 	}
+	dismissing, cancel := context.WithTimeout(context.WithoutCancel(ctx), dismissTimeout)
+	defer cancel()
+	if err := obj.CallWithContext(dismissing, ifacePrompt+".Dismiss", 0).Err; err != nil {
+		return dbus.Variant{}, errors.Join(ctx.Err(), fmt.Errorf("dismiss the prompt: %w", err))
+	}
+	return dbus.Variant{}, ctx.Err()
 }
 
 type Keychain struct{ conn *dbus.Conn }

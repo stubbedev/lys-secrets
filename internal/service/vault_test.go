@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/lys-lib/dbustest"
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
@@ -226,32 +227,37 @@ func TestVaultCollectionRefusesAClash(t *testing.T) {
 	}
 }
 
+type completion struct {
+	Dismissed bool         `dbus:"dismissed"`
+	Result    dbus.Variant `dbus:"result"`
+}
+
+var promptCompleted = dbusx.NewSignal[completion](ifacePrompt, "Completed")
+
 // watchCompleted watches prompt's Completed and returns the wait for
 // it: whether it was dismissed, and the paths it carries.
 func watchCompleted(t *testing.T, f *fixture, prompt dbus.ObjectPath) func() (bool, []dbus.ObjectPath) {
 	t.Helper()
-	conn := f.bus.Conn(t)
-	if err := conn.AddMatchSignal(dbus.WithMatchObjectPath(prompt), dbus.WithMatchInterface(ifacePrompt)); err != nil {
+	completed := make(chan completion, 1)
+	w, err := dbusx.WatchSignals(t.Context(), f.bus.Conn(t), dbusx.FromOwner(BusName), func(err error) { t.Errorf("watch %s: %v", prompt, err) },
+		dbusx.On(promptCompleted, prompt, func(c completion, _ dbus.Sequence) error {
+			completed <- c
+			return nil
+		}))
+	if err != nil {
 		t.Fatal(err)
 	}
-	signals := make(chan *dbus.Signal, 4)
-	conn.Signal(signals)
+	t.Cleanup(func() { _ = w.Stop() })
 	return func() (bool, []dbus.ObjectPath) {
 		t.Helper()
-		for {
-			select {
-			case sig := <-signals:
-				if sig.Path != prompt || sig.Name != ifacePrompt+".Completed" || len(sig.Body) != 2 {
-					continue
-				}
-				dismissed, _ := sig.Body[0].(bool)
-				result, _ := sig.Body[1].(dbus.Variant)
-				paths, _ := result.Value().([]dbus.ObjectPath)
-				return dismissed, paths
-			case <-time.After(10 * time.Second):
-				t.Fatal("the prompt never completed")
-			}
+		select {
+		case c := <-completed:
+			paths, _ := c.Result.Value().([]dbus.ObjectPath)
+			return c.Dismissed, paths
+		case <-time.After(10 * time.Second):
+			t.Fatal("the prompt never completed")
 		}
+		return false, nil
 	}
 }
 

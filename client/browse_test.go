@@ -12,6 +12,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 
 	"github.com/stubbedev/lys-secrets/client"
+	"github.com/stubbedev/lys-secrets/internal/fdtest"
 	"github.com/stubbedev/lys-secrets/secretstest"
 )
 
@@ -68,11 +69,15 @@ func TestDeletingAnItemIsAnnouncedAndChangeLockRekeys(t *testing.T) {
 	c, srv := browseRig(t)
 	ctx := context.Background()
 	changed := make(chan struct{}, 4)
-	stop, err := c.WatchItems(client.LoginCollection, func() { changed <- struct{}{} })
+	w, err := c.WatchItems(t.Context(), client.LoginCollection, func() { changed <- struct{}{} }, func(err error) { t.Errorf("the watch failed: %v", err) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stop()
+	defer func() {
+		if err := w.Stop(); err != nil {
+			t.Errorf("stop watching the items: %v", err)
+		}
+	}()
 	items, _ := c.Search(ctx, client.LoginCollection)
 	if err := c.DeleteItem(ctx, items[0]); err != nil {
 		t.Fatal(err)
@@ -100,6 +105,42 @@ func TestDeletingAnItemIsAnnouncedAndChangeLockRekeys(t *testing.T) {
 	if srv.Asked() != asked+1 || bytes.Equal(before[:64], after[:64]) {
 		t.Fatalf("asked %d more times, header changed %v", srv.Asked()-asked, !bytes.Equal(before[:64], after[:64]))
 	}
+}
+
+// Only the provider announces a change of items: an ItemCreated from
+// anyone else is dropped, with the descriptor it carries closed.
+func TestWatchItemsClosesTheDescriptorsOfAnImpostorsAnnouncement(t *testing.T) {
+	bus := dbustest.Start(t)
+	secretstest.Start(t, bus.Conn(t), "login-pw")
+	ctx := context.Background()
+	c, err := client.OpenEncrypted(ctx, bus.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	changed := make(chan struct{}, 4)
+	w, err := c.WatchItems(t.Context(), client.LoginCollection, func() { changed <- struct{}{} }, func(err error) { t.Errorf("the watch failed: %v", err) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Stop() })
+	pipe := fdtest.New(t)
+	impostor := bus.Conn(t)
+	if err := impostor.Emit(client.LoginCollection, "org.freedesktop.Secret.Collection.ItemCreated", client.LoginCollection+"/9", pipe.Write); err != nil {
+		t.Fatal(err)
+	}
+	if err := impostor.BusObject().Call("org.freedesktop.DBus.GetId", 0).Err; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StoreLogin(ctx, "Mail", map[string]string{"service": "mail"}, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-changed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the provider's ItemCreated behind the impostor's was not announced")
+	}
+	pipe.RequireEveryCopyClosed(t)
 }
 
 func TestAnUnlockedItemIsDescribed(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/transport"
@@ -228,28 +228,32 @@ func (c *Client) DeleteItem(ctx context.Context, item dbus.ObjectPath) error {
 	return nil
 }
 
-// WatchItems calls changed on every item created, changed or deleted in
-// coll, until stop.
-func (c *Client) WatchItems(coll dbus.ObjectPath, changed func()) (stop func(), err error) {
-	match := []dbus.MatchOption{dbus.WithMatchObjectPath(coll), dbus.WithMatchInterface(ifaceCollection)}
-	if err := c.conn.AddMatchSignal(match...); err != nil {
+type itemEvent struct {
+	Item dbus.ObjectPath `dbus:"item"`
+}
+
+var itemSignals = [...]dbusx.Signal[itemEvent]{
+	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemCreated"),
+	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemDeleted"),
+	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemChanged"),
+}
+
+// WatchItems runs changed, on the watch's goroutine, on every item
+// created, changed or deleted in coll that the provider owning the
+// Secret Service's name announces, until ctx ends or the watch is
+// stopped. failed is told, on the same goroutine, of such an
+// announcement that did not decode.
+func (c *Client) WatchItems(ctx context.Context, coll dbus.ObjectPath, changed func(), failed func(error)) (*dbusx.Watch, error) {
+	routes := make([]dbusx.Route, 0, len(itemSignals))
+	for _, sig := range itemSignals {
+		routes = append(routes, dbusx.On(sig, coll, func(itemEvent, dbus.Sequence) error {
+			changed()
+			return nil
+		}))
+	}
+	w, err := dbusx.WatchSignals(ctx, c.conn, dbusx.FromOwner(busName), failed, routes...)
+	if err != nil {
 		return nil, fmt.Errorf("secrets: follow %s: %w", coll, err)
 	}
-	ch := make(chan *dbus.Signal, 16)
-	c.conn.Signal(ch)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for sig := range ch {
-			if sig.Path == coll && strings.HasPrefix(sig.Name, ifaceCollection+".Item") {
-				changed()
-			}
-		}
-	}()
-	return func() {
-		c.conn.RemoveSignal(ch)
-		_ = c.conn.RemoveMatchSignal(match...)
-		close(ch)
-		<-done
-	}, nil
+	return w, nil
 }

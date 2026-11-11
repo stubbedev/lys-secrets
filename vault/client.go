@@ -149,88 +149,49 @@ type Watcher struct {
 }
 
 // Watch reports the vault's signals to w, each on the watch's
-// goroutine, until ctx ends. Only the signals of the vault's current
-// owner count; a malformed one is logged and skipped.
+// goroutine, until ctx ends. Only the signals of whoever owns the
+// vault's name as they arrive count, across a restart of the vault; a
+// malformed one is logged and skipped.
 func (c *Client) Watch(ctx context.Context, w Watcher) error {
-	match := []dbus.MatchOption{dbus.WithMatchSender(ServiceName), dbus.WithMatchObjectPath(ServicePath), dbus.WithMatchInterface(iface)}
-	if err := c.conn.AddMatchSignalContext(ctx, match...); err != nil {
-		return fmt.Errorf("vault: watch %s: %w", ServiceName, err)
-	}
-	signals := make(chan *dbus.Signal, 16)
-	c.conn.Signal(signals)
-	appeared := make(chan struct{}, 1)
-	stopOwner, err := dbusx.WatchOwner(ctx, c.conn, ServiceName, func(dbus.Sequence) {
-		select {
-		case appeared <- struct{}{}:
-		default:
-		}
-	})
+	watch, err := dbusx.WatchSignals(ctx, c.conn, dbusx.FromOwner(ServiceName),
+		func(err error) { log.Printf("vault: skip a signal: %v", err) },
+		dbusx.On(changed, ServicePath, func(raw wireStatus, _ dbus.Sequence) error {
+			st, err := fromWire(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", changed.Name(), err)
+			}
+			w.Changed(st)
+			return nil
+		}),
+		dbusx.On(syncFailed, ServicePath, func(raw wireError, _ dbus.Sequence) error {
+			err := fromWireError(raw)
+			if err == nil {
+				return fmt.Errorf("%s without an error", syncFailed.Name())
+			}
+			w.SyncFailed(err)
+			return nil
+		}),
+		dbusx.OnOwnerChange(ServiceName, func(_, owner string, _ dbus.Sequence) error {
+			if owner == "" {
+				return nil
+			}
+			st, err := c.Status(ctx)
+			if err != nil {
+				return fmt.Errorf("the status of the vault that appeared: %w", err)
+			}
+			w.Changed(st)
+			return nil
+		}))
 	if err != nil {
-		c.conn.RemoveSignal(signals)
-		_ = c.conn.RemoveMatchSignal(match...)
 		return fmt.Errorf("vault: watch %s: %w", ServiceName, err)
 	}
-	owner, _ := dbusx.NameOwner(ctx, c.conn, ServiceName)
 	go func() {
-		defer func() {
-			if err := stopOwner(); err != nil {
-				log.Printf("vault: %v", err)
-			}
-			c.conn.RemoveSignal(signals)
-			_ = c.conn.RemoveMatchSignal(match...)
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-appeared:
-				owner, _ = dbusx.NameOwner(ctx, c.conn, ServiceName)
-				st, err := c.Status(ctx)
-				if err != nil {
-					log.Printf("vault: the status of the vault that appeared: %v", err)
-					continue
-				}
-				w.Changed(st)
-			case sig, ok := <-signals:
-				if !ok {
-					return
-				}
-				if sig.Sender == owner && sig.Path == ServicePath {
-					dispatch(sig, w)
-				}
-			}
+		<-watch.Done()
+		if err := watch.Stop(); err != nil && !errors.Is(err, dbusx.ErrDisconnected) {
+			log.Printf("vault: %v", err)
 		}
 	}()
 	return nil
-}
-
-func dispatch(sig *dbus.Signal, w Watcher) {
-	switch sig.Name {
-	case changed.Name():
-		raw, err := changed.Decode(sig)
-		if err != nil {
-			log.Printf("vault: skip a malformed signal: %v", err)
-			return
-		}
-		st, err := fromWire(raw)
-		if err != nil {
-			log.Printf("vault: skip a malformed signal: %v", err)
-			return
-		}
-		w.Changed(st)
-	case syncFailed.Name():
-		raw, err := syncFailed.Decode(sig)
-		if err != nil {
-			log.Printf("vault: skip a malformed signal: %v", err)
-			return
-		}
-		err = fromWireError(raw)
-		if err == nil {
-			log.Printf("vault: skip a %s signal without an error", sig.Name)
-			return
-		}
-		w.SyncFailed(err)
-	}
 }
 
 func (c *Client) CreateLogin(ctx context.Context, l NewLogin) (ItemID, error) {
