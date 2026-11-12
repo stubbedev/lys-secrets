@@ -10,6 +10,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/transport"
 )
 
@@ -30,7 +31,7 @@ func OpenEncrypted(ctx context.Context, conn *dbus.Conn) (*Client, error) {
 	public := new(big.Int).Exp(transport.Generator, priv, transport.Prime).Bytes()
 	c := &Client{conn: conn, svc: conn.Object(busName, servicePath)}
 	var out dbus.Variant
-	if err := c.svc.CallWithContext(ctx, ifaceService+".OpenSession", 0, transport.AlgDH, dbus.MakeVariant(public)).Store(&out, &c.session); err != nil {
+	if err := c.svc.CallWithContext(ctx, secretbus.ServiceInterface+".OpenSession", 0, transport.AlgDH, dbus.MakeVariant(public)).Store(&out, &c.session); err != nil {
 		return nil, fmt.Errorf("secrets: open an encrypted session with %s: %w", busName, err)
 	}
 	peer, ok := out.Value().([]byte)
@@ -65,12 +66,12 @@ type Item struct {
 
 // Collections is every collection the provider serves.
 func (c *Client) Collections(ctx context.Context) ([]Collection, error) {
-	v, err := c.svc.GetProperty(ifaceService + ".Collections")
+	v, err := c.svc.GetProperty(secretbus.ServiceInterface + ".Collections")
 	if err != nil {
 		return nil, fmt.Errorf("secrets: list the collections: %w", err)
 	}
 	paths, _ := v.Value().([]dbus.ObjectPath)
-	props, err := c.getAll(ctx, paths, ifaceCollection)
+	props, err := c.getAll(ctx, paths, secretbus.CollectionInterface)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +87,7 @@ func (c *Client) Collections(ctx context.Context) ([]Collection, error) {
 // Search is every item of coll, locked or not.
 func (c *Client) Search(ctx context.Context, coll dbus.ObjectPath) ([]dbus.ObjectPath, error) {
 	var out []dbus.ObjectPath
-	if err := c.conn.Object(busName, coll).CallWithContext(ctx, ifaceCollection+".SearchItems", 0, map[string]string{}).Store(&out); err != nil {
+	if err := c.conn.Object(busName, coll).CallWithContext(ctx, secretbus.CollectionInterface+".SearchItems", 0, map[string]string{}).Store(&out); err != nil {
 		return nil, fmt.Errorf("secrets: search %s: %w", coll, err)
 	}
 	return out, nil
@@ -95,7 +96,7 @@ func (c *Client) Search(ctx context.Context, coll dbus.ObjectPath) ([]dbus.Objec
 // Describe is the items' labels, attributes, times and lock state, their
 // GetAll calls sent together and collected after.
 func (c *Client) Describe(ctx context.Context, items []dbus.ObjectPath) ([]Item, error) {
-	props, err := c.getAll(ctx, items, ifaceItem)
+	props, err := c.getAll(ctx, items, secretbus.ItemInterface)
 	if err != nil {
 		return nil, err
 	}
@@ -132,13 +133,13 @@ func (c *Client) getAll(ctx context.Context, paths []dbus.ObjectPath, iface stri
 // should clear them when done.
 func (c *Client) Secret(ctx context.Context, item dbus.ObjectPath) ([]byte, error) {
 	var s secret
-	err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceItem+".GetSecret", 0, c.session).Store(&s)
+	err := c.conn.Object(busName, item).CallWithContext(ctx, secretbus.ItemInterface+".GetSecret", 0, c.session).Store(&s)
 	var derr dbus.Error
 	if errors.As(err, &derr) && derr.Name == errIsLocked {
 		if err := c.Unlock(ctx, []dbus.ObjectPath{item}); err != nil {
 			return nil, err
 		}
-		err = c.conn.Object(busName, item).CallWithContext(ctx, ifaceItem+".GetSecret", 0, c.session).Store(&s)
+		err = c.conn.Object(busName, item).CallWithContext(ctx, secretbus.ItemInterface+".GetSecret", 0, c.session).Store(&s)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("secrets: read %s: %w", item, err)
@@ -157,7 +158,7 @@ func (c *Client) SetSecret(ctx context.Context, item dbus.ObjectPath, value []by
 	if err != nil {
 		return fmt.Errorf("secrets: encrypt for %s: %w", item, err)
 	}
-	if err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceItem+".SetSecret", 0, secret{Session: c.session, Parameters: params, Value: enc, ContentType: contentType}).Err; err != nil {
+	if err := c.conn.Object(busName, item).CallWithContext(ctx, secretbus.ItemInterface+".SetSecret", 0, secret{Session: c.session, Parameters: params, Value: enc, ContentType: contentType}).Err; err != nil {
 		return fmt.Errorf("secrets: replace the secret of %s: %w", item, err)
 	}
 	return nil
@@ -165,7 +166,7 @@ func (c *Client) SetSecret(ctx context.Context, item dbus.ObjectPath, value []by
 
 // SetLabel renames the item.
 func (c *Client) SetLabel(ctx context.Context, item dbus.ObjectPath, label string) error {
-	if err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceProperties+".Set", 0, ifaceItem, "Label", dbus.MakeVariant(label)).Err; err != nil {
+	if err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceProperties+".Set", 0, secretbus.ItemInterface, "Label", dbus.MakeVariant(label)).Err; err != nil {
 		return fmt.Errorf("secrets: rename %s: %w", item, err)
 	}
 	return nil
@@ -185,7 +186,7 @@ func (c *Client) Lock(ctx context.Context, objects []dbus.ObjectPath) error {
 func (c *Client) withPrompt(ctx context.Context, what, method string, objects []dbus.ObjectPath) error {
 	var done []dbus.ObjectPath
 	var prompt dbus.ObjectPath
-	if err := c.svc.CallWithContext(ctx, ifaceService+method, 0, objects).Store(&done, &prompt); err != nil {
+	if err := c.svc.CallWithContext(ctx, secretbus.ServiceInterface+method, 0, objects).Store(&done, &prompt); err != nil {
 		return fmt.Errorf("secrets: %s %v: %w", what, objects, err)
 	}
 	if prompt == noPath {
@@ -201,7 +202,7 @@ func (c *Client) withPrompt(ctx context.Context, what, method string, objects []
 // prompt (lys-secrets' extension of the service).
 func (c *Client) ChangeLock(ctx context.Context, coll dbus.ObjectPath) error {
 	var prompt dbus.ObjectPath
-	if err := c.svc.CallWithContext(ctx, ifaceService+".ChangeLock", 0, coll).Store(&prompt); err != nil {
+	if err := c.svc.CallWithContext(ctx, secretbus.ServiceInterface+".ChangeLock", 0, coll).Store(&prompt); err != nil {
 		return fmt.Errorf("secrets: change the password of %s: %w", coll, err)
 	}
 	if prompt == noPath {
@@ -216,7 +217,7 @@ func (c *Client) ChangeLock(ctx context.Context, coll dbus.ObjectPath) error {
 // DeleteItem deletes the item, through a prompt when the provider asks.
 func (c *Client) DeleteItem(ctx context.Context, item dbus.ObjectPath) error {
 	var prompt dbus.ObjectPath
-	if err := c.conn.Object(busName, item).CallWithContext(ctx, ifaceItem+".Delete", 0).Store(&prompt); err != nil {
+	if err := c.conn.Object(busName, item).CallWithContext(ctx, secretbus.ItemInterface+".Delete", 0).Store(&prompt); err != nil {
 		return fmt.Errorf("secrets: delete %s: %w", item, err)
 	}
 	if prompt == noPath {
@@ -228,25 +229,16 @@ func (c *Client) DeleteItem(ctx context.Context, item dbus.ObjectPath) error {
 	return nil
 }
 
-type itemEvent struct {
-	Item dbus.ObjectPath `dbus:"item"`
-}
-
-var itemSignals = [...]dbusx.Signal[itemEvent]{
-	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemCreated"),
-	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemDeleted"),
-	dbusx.NewSignal[itemEvent](ifaceCollection, "ItemChanged"),
-}
-
 // WatchItems runs changed, on the watch's goroutine, on every item
 // created, changed or deleted in coll that the provider owning the
 // Secret Service's name announces, until ctx ends or the watch is
 // stopped. failed is told, on the same goroutine, of such an
 // announcement that did not decode.
 func (c *Client) WatchItems(ctx context.Context, coll dbus.ObjectPath, changed func(), failed func(error)) (*dbusx.Watch, error) {
+	itemSignals := [...]dbusx.Signal[secretbus.ItemEvent]{secretbus.ItemCreated, secretbus.ItemDeleted, secretbus.ItemChanged}
 	routes := make([]dbusx.Route, 0, len(itemSignals))
 	for _, sig := range itemSignals {
-		routes = append(routes, dbusx.On(sig, coll, func(itemEvent, dbus.Sequence) error {
+		routes = append(routes, dbusx.On(sig, coll, func(secretbus.ItemEvent, dbus.Sequence) error {
 			changed()
 			return nil
 		}))

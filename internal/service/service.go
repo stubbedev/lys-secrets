@@ -29,6 +29,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/control"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/transport"
 )
 
@@ -41,11 +42,6 @@ const (
 	sessionBase     = "/org/freedesktop/secrets/session/"
 	promptBase      = "/org/freedesktop/secrets/prompt/"
 	noPrompt        = dbus.ObjectPath("/")
-	ifaceService    = "org.freedesktop.Secret.Service"
-	ifaceCollection = "org.freedesktop.Secret.Collection"
-	ifaceItem       = "org.freedesktop.Secret.Item"
-	ifaceSession    = "org.freedesktop.Secret.Session"
-	ifacePrompt     = "org.freedesktop.Secret.Prompt"
 	propItemLabel   = "org.freedesktop.Secret.Item.Label"
 	propItemAttrs   = "org.freedesktop.Secret.Item.Attributes"
 	propCollLabel   = "org.freedesktop.Secret.Collection.Label"
@@ -207,7 +203,7 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 		colls: map[string]*collection{}, reserved: map[string]struct{}{}, aliasOff: map[string]func(){},
 		sessions: map[dbus.ObjectPath]*session{}, prompts: map[dbus.ObjectPath]func(){},
 		peers: newPeers(conn), grants: map[string]map[itemRef]struct{}{},
-		signals: newSignalQueue(conn.Emit),
+		signals: newSignalQueue(),
 	}
 	var err error
 	if s.aliases, err = s.disk.loadAliases(); err != nil {
@@ -244,8 +240,9 @@ func Start(conn *dbus.Conn, cfg Config) (*Service, error) {
 // watches for clients leaving and takes the bus name last.
 func (s *Service) serveLocked() error {
 	off, err := dbusx.Export(s.conn, rootPath, dbusx.Interface{
-		Name: ifaceService, Methods: serviceMethods{s},
+		Name: secretbus.ServiceInterface, Methods: serviceMethods{s},
 		Properties: dbusx.Getters{"Collections": s.collectionPathsLocked},
+		Signals:    []dbusx.SignalDecl{secretbus.CollectionCreated, secretbus.CollectionDeleted, secretbus.CollectionChanged},
 	})
 	if err != nil {
 		return err
@@ -253,10 +250,10 @@ func (s *Service) serveLocked() error {
 	s.stops = append(s.stops, off)
 	for _, base := range []string{aliasBase, collectionBase} {
 		path := dbus.ObjectPath(strings.TrimSuffix(base, "/"))
-		if err := s.conn.ExportSubtree(missingCollection{}, path, ifaceCollection); err != nil {
+		if err := s.conn.ExportSubtree(missingCollection{}, path, secretbus.CollectionInterface); err != nil {
 			return fmt.Errorf("export the missing-collection fallback: %w", err)
 		}
-		s.stops = append(s.stops, func() { _ = s.conn.Export(nil, path, ifaceCollection) })
+		s.stops = append(s.stops, func() { _ = s.conn.Export(nil, path, secretbus.CollectionInterface) })
 	}
 	for _, c := range s.colls {
 		if err := s.exportCollectionLocked(c); err != nil {
@@ -444,7 +441,7 @@ func (s *Service) finishUnlock(c *collection, password []byte, opening *keyring.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
+	emit(s, secretbus.CollectionChanged, rootPath, secretbus.CollectionEvent{Collection: collectionPath(c.id)})
 	return nil
 }
 
@@ -576,11 +573,6 @@ func (s *Service) locked(fn func() any) func() any {
 	}
 }
 
-// emitLocked queues a signal, in order with every other, for after the lock.
-func (s *Service) emitLocked(path dbus.ObjectPath, name string, args ...any) {
-	s.signals.post(path, name, args...)
-}
-
 func (s *Service) saveCollection(id string, data []byte) error {
 	if err := s.disk.save(id, data); err != nil {
 		return fmt.Errorf("save collection %s: %w", id, err)
@@ -681,13 +673,15 @@ func (s *Service) addCollection(pick func(taken func(string) bool) string, kr *k
 	if err := s.exportCollectionLocked(c); err != nil {
 		return "", err
 	}
-	s.emitLocked(rootPath, ifaceService+".CollectionCreated", collectionPath(id))
+	emit(s, secretbus.CollectionCreated, rootPath, secretbus.CollectionEvent{Collection: collectionPath(id)})
 	return id, nil
 }
 
+var collectionSignals = []dbusx.SignalDecl{secretbus.ItemCreated, secretbus.ItemDeleted, secretbus.ItemChanged}
+
 func (s *Service) collectionIface(c *collection) dbusx.Interface {
 	return dbusx.Interface{
-		Name: ifaceCollection, Methods: collectionMethods{s, c.id},
+		Name: secretbus.CollectionInterface, Methods: collectionMethods{s, c.id},
 		Properties: dbusx.Getters{
 			"Items": s.locked(func() any {
 				out := []dbus.ObjectPath{}
@@ -701,13 +695,14 @@ func (s *Service) collectionIface(c *collection) dbusx.Interface {
 			"Created":  s.locked(func() any { return unixSeconds(c.kr.Created()) }),
 			"Modified": s.locked(func() any { return unixSeconds(c.kr.Modified()) }),
 		},
+		Signals: collectionSignals,
 		Setters: dbusx.Setters{"Label": func(v dbus.Variant) *dbus.Error {
 			label, ok := v.Value().(string)
 			if !ok {
 				return dbusx.InvalidArgs("Label is a string")
 			}
 			err := s.change(c, func(kr *keyring.Collection) error { return kr.SetLabel(label, s.now()) }, func() error {
-				s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
+				emit(s, secretbus.CollectionChanged, rootPath, secretbus.CollectionEvent{Collection: collectionPath(c.id)})
 				return nil
 			})
 			if err != nil {
@@ -798,7 +793,7 @@ func (s *Service) exportItemLocked(c *collection, id uint32) error {
 		})
 	}
 	off, err := dbusx.Export(s.conn, itemPath(c.id, id), dbusx.Interface{
-		Name: ifaceItem, Methods: itemMethods{s, c.id, id},
+		Name: secretbus.ItemInterface, Methods: itemMethods{s, c.id, id},
 		Properties: dbusx.Getters{
 			"Locked": s.locked(func() any { return c.kr.Locked() }),
 			"Label":  item(func(it keyring.Item) any { return it.Label }),
@@ -842,7 +837,7 @@ func (s *Service) itemSetter(c *collection, id uint32, decode func(dbus.Variant)
 			return derr
 		}
 		err := s.change(c, apply, func() error {
-			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, id))
+			emit(s, secretbus.ItemChanged, collectionPath(c.id), secretbus.ItemEvent{Item: itemPath(c.id, id)})
 			return nil
 		})
 		if err != nil {
@@ -863,7 +858,7 @@ func (s *Service) lockCollectionLocked(c *collection) {
 	if s.cfg.Locked != nil {
 		s.cfg.Locked(c.id)
 	}
-	s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(c.id))
+	emit(s, secretbus.CollectionChanged, rootPath, secretbus.CollectionEvent{Collection: collectionPath(c.id)})
 }
 
 const (

@@ -11,6 +11,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
@@ -115,7 +116,7 @@ func (s *Service) startVaultLocked(v Vault) error {
 	}
 	vc := &vaultColl{v: v, logins: map[dbus.ObjectPath]VaultLogin{}, items: map[dbus.ObjectPath]func(){}}
 	off, err := dbusx.Export(s.conn, collectionPath(VaultID), dbusx.Interface{
-		Name: ifaceCollection, Methods: vaultCollectionMethods{s},
+		Name: secretbus.CollectionInterface, Methods: vaultCollectionMethods{s},
 		Properties: dbusx.Getters{
 			"Items":    s.locked(func() any { return slices.Sorted(maps.Keys(s.vault.logins)) }),
 			"Label":    func() any { return "Bitwarden" },
@@ -123,6 +124,7 @@ func (s *Service) startVaultLocked(v Vault) error {
 			"Created":  func() any { return uint64(0) },
 			"Modified": func() any { return uint64(0) },
 		},
+		Signals: collectionSignals,
 	})
 	if err != nil {
 		return err
@@ -159,7 +161,7 @@ func (s *Service) syncVaultLocked() {
 		vc.items[p]()
 		delete(vc.items, p)
 		delete(vc.logins, p)
-		s.emitLocked(collectionPath(VaultID), ifaceCollection+".ItemDeleted", p)
+		emit(s, secretbus.ItemDeleted, collectionPath(VaultID), secretbus.ItemEvent{Item: p})
 		changed = true
 	}
 	for _, p := range slices.Sorted(maps.Keys(current)) {
@@ -173,15 +175,15 @@ func (s *Service) syncVaultLocked() {
 				delete(vc.logins, p)
 				continue
 			}
-			s.emitLocked(collectionPath(VaultID), ifaceCollection+".ItemCreated", p)
+			emit(s, secretbus.ItemCreated, collectionPath(VaultID), secretbus.ItemEvent{Item: p})
 			changed = true
 		case old != l:
-			s.emitLocked(collectionPath(VaultID), ifaceCollection+".ItemChanged", p)
+			emit(s, secretbus.ItemChanged, collectionPath(VaultID), secretbus.ItemEvent{Item: p})
 			changed = true
 		}
 	}
 	if changed {
-		s.emitLocked(rootPath, ifaceService+".CollectionChanged", collectionPath(VaultID))
+		emit(s, secretbus.CollectionChanged, rootPath, secretbus.CollectionEvent{Collection: collectionPath(VaultID)})
 	}
 }
 
@@ -190,7 +192,7 @@ func (s *Service) exportVaultItemLocked(p dbus.ObjectPath) error {
 		return s.locked(func() any { return read(s.vault.logins[p]) })
 	}
 	off, err := dbusx.Export(s.conn, p, dbusx.Interface{
-		Name: ifaceItem, Methods: vaultItemMethods{s, p},
+		Name: secretbus.ItemInterface, Methods: vaultItemMethods{s, p},
 		Properties: dbusx.Getters{
 			"Locked":     s.locked(func() any { return !s.vault.open }),
 			"Label":      login(func(l VaultLogin) any { return l.Name }),

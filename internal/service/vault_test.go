@@ -14,6 +14,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/vault"
 )
 
@@ -104,13 +105,13 @@ func TestVaultCollectionUnlocksThroughThePrompt(t *testing.T) {
 	tool := requireTool(t, "secret-tool")
 	f, v := vaultFixture(t)
 	coll := collectionPath(VaultID)
-	if paths, _ := f.prop(t, rootPath, ifaceService+".Collections").([]dbus.ObjectPath); !slices.Contains(paths, coll) {
+	if paths, _ := f.prop(t, rootPath, secretbus.ServiceInterface+".Collections").([]dbus.ObjectPath); !slices.Contains(paths, coll) {
 		t.Fatalf("collections %v lack the vault", paths)
 	}
-	if locked, _ := f.prop(t, coll, ifaceCollection+".Locked").(bool); !locked {
+	if locked, _ := f.prop(t, coll, secretbus.CollectionInterface+".Locked").(bool); !locked {
 		t.Error("a locked vault's collection is unlocked")
 	}
-	if items, _ := f.prop(t, coll, ifaceCollection+".Items").([]dbus.ObjectPath); len(items) != 0 {
+	if items, _ := f.prop(t, coll, secretbus.CollectionInterface+".Items").([]dbus.ObjectPath); len(items) != 0 {
 		t.Errorf("a locked vault lists %v", items)
 	}
 	if got, _ := run(t, "", tool, "lookup", "username", "ada"); got != "" {
@@ -119,12 +120,12 @@ func TestVaultCollectionUnlocksThroughThePrompt(t *testing.T) {
 
 	var unlocked []dbus.ObjectPath
 	var prompt dbus.ObjectPath
-	if err := f.bus.Conn(t).Object(BusName, rootPath).Call(ifaceService+".Unlock", 0, []dbus.ObjectPath{coll}).Store(&unlocked, &prompt); err != nil || prompt == noPrompt {
+	if err := f.bus.Conn(t).Object(BusName, rootPath).Call(secretbus.ServiceInterface+".Unlock", 0, []dbus.ObjectPath{coll}).Store(&unlocked, &prompt); err != nil || prompt == noPrompt {
 		t.Fatalf("Unlock = %v, %v, %v", unlocked, prompt, err)
 	}
 	f.prompter.script("wrong", "master")
 	completed := watchCompleted(t, f, prompt)
-	if err := f.bus.Conn(t).Object(BusName, prompt).Call(ifacePrompt+".Prompt", 0, "").Err; err != nil {
+	if err := f.bus.Conn(t).Object(BusName, prompt).Call(secretbus.PromptInterface+".Prompt", 0, "").Err; err != nil {
 		t.Fatal(err)
 	}
 	if dismissed, result := completed(); dismissed || !slices.Contains(result, coll) {
@@ -137,16 +138,16 @@ func TestVaultCollectionUnlocksThroughThePrompt(t *testing.T) {
 	if err != nil || got != "mail-pw" {
 		t.Fatalf("lookup = %q, %v", got, err)
 	}
-	items, _ := f.prop(t, coll, ifaceCollection+".Items").([]dbus.ObjectPath)
+	items, _ := f.prop(t, coll, secretbus.CollectionInterface+".Items").([]dbus.ObjectPath)
 	if len(items) != 2 {
 		t.Fatalf("items %v", items)
 	}
-	attrs, _ := f.prop(t, vaultItemPath(v.logins[0].ID), ifaceItem+".Attributes").(map[string]string)
+	attrs, _ := f.prop(t, vaultItemPath(v.logins[0].ID), secretbus.ItemInterface+".Attributes").(map[string]string)
 	want := map[string]string{"xdg:schema": vaultSchema, "bitwarden:id": v.logins[0].ID, "name": "Mail", "username": "ada", "uri": "https://mail.example.com", "folder": "Desktop"}
 	if fmt.Sprint(attrs) != fmt.Sprint(want) {
 		t.Errorf("attributes = %v, want %v", attrs, want)
 	}
-	if label, _ := f.prop(t, vaultItemPath(v.logins[1].ID), ifaceItem+".Label").(string); label != "Chat" {
+	if label, _ := f.prop(t, vaultItemPath(v.logins[1].ID), secretbus.ItemInterface+".Label").(string); label != "Chat" {
 		t.Errorf("label = %q", label)
 	}
 }
@@ -176,10 +177,10 @@ func TestVaultCollectionIsReadOnlyAndLocks(t *testing.T) {
 	secret := plainSecret(sess, "new")
 	props := itemProps("x")
 	for name, err := range map[string]error{
-		"CreateItem": conn.Object(BusName, collectionPath(VaultID)).Call(ifaceCollection+".CreateItem", 0, props, secret, false).Err,
-		"Delete":     conn.Object(BusName, collectionPath(VaultID)).Call(ifaceCollection+".Delete", 0).Err,
-		"item":       conn.Object(BusName, item).Call(ifaceItem+".Delete", 0).Err,
-		"SetSecret":  conn.Object(BusName, item).Call(ifaceItem+".SetSecret", 0, secret).Err,
+		"CreateItem": conn.Object(BusName, collectionPath(VaultID)).Call(secretbus.CollectionInterface+".CreateItem", 0, props, secret, false).Err,
+		"Delete":     conn.Object(BusName, collectionPath(VaultID)).Call(secretbus.CollectionInterface+".Delete", 0).Err,
+		"item":       conn.Object(BusName, item).Call(secretbus.ItemInterface+".Delete", 0).Err,
+		"SetSecret":  conn.Object(BusName, item).Call(secretbus.ItemInterface+".SetSecret", 0, secret).Err,
 		"Label":      conn.Object(BusName, item).SetProperty(propItemLabel, dbus.MakeVariant("y")),
 	} {
 		if err == nil {
@@ -187,22 +188,22 @@ func TestVaultCollectionIsReadOnlyAndLocks(t *testing.T) {
 		}
 	}
 	var got Secret
-	if err := conn.Object(BusName, item).Call(ifaceItem+".GetSecret", 0, sess).Store(&got); err != nil || string(got.Value) != "mail-pw" {
+	if err := conn.Object(BusName, item).Call(secretbus.ItemInterface+".GetSecret", 0, sess).Store(&got); err != nil || string(got.Value) != "mail-pw" {
 		t.Fatalf("GetSecret = %q, %v", got.Value, err)
 	}
 	var locked []dbus.ObjectPath
 	var prompt dbus.ObjectPath
-	if err := conn.Object(BusName, rootPath).Call(ifaceService+".Lock", 0, []dbus.ObjectPath{collectionPath(VaultID)}).Store(&locked, &prompt); err != nil {
+	if err := conn.Object(BusName, rootPath).Call(secretbus.ServiceInterface+".Lock", 0, []dbus.ObjectPath{collectionPath(VaultID)}).Store(&locked, &prompt); err != nil {
 		t.Fatal(err)
 	}
 	if _, open := v.Logins(); open {
 		t.Error("locking the collection left the vault open")
 	}
-	if items, _ := f.prop(t, collectionPath(VaultID), ifaceCollection+".Items").([]dbus.ObjectPath); len(items) != 0 {
+	if items, _ := f.prop(t, collectionPath(VaultID), secretbus.CollectionInterface+".Items").([]dbus.ObjectPath); len(items) != 0 {
 		t.Errorf("a locked vault still lists %v", items)
 	}
 	got = Secret{}
-	if err := conn.Object(BusName, item).Call(ifaceItem+".GetSecret", 0, sess).Store(&got); err == nil || len(got.Value) != 0 {
+	if err := conn.Object(BusName, item).Call(secretbus.ItemInterface+".GetSecret", 0, sess).Store(&got); err == nil || len(got.Value) != 0 {
 		t.Errorf("GetSecret after locking = %q, %v", got.Value, err)
 	}
 }
@@ -227,20 +228,13 @@ func TestVaultCollectionRefusesAClash(t *testing.T) {
 	}
 }
 
-type completion struct {
-	Dismissed bool         `dbus:"dismissed"`
-	Result    dbus.Variant `dbus:"result"`
-}
-
-var promptCompleted = dbusx.NewSignal[completion](ifacePrompt, "Completed")
-
 // watchCompleted watches prompt's Completed and returns the wait for
 // it: whether it was dismissed, and the paths it carries.
 func watchCompleted(t *testing.T, f *fixture, prompt dbus.ObjectPath) func() (bool, []dbus.ObjectPath) {
 	t.Helper()
-	completed := make(chan completion, 1)
+	completed := make(chan secretbus.Completion, 1)
 	w, err := dbusx.WatchSignals(t.Context(), f.bus.Conn(t), dbusx.FromOwner(BusName), func(err error) { t.Errorf("watch %s: %v", prompt, err) },
-		dbusx.On(promptCompleted, prompt, func(c completion, _ dbus.Sequence) error {
+		dbusx.On(secretbus.PromptCompleted, prompt, func(c secretbus.Completion, _ dbus.Sequence) error {
 			completed <- c
 			return nil
 		}))
@@ -309,13 +303,13 @@ func TestLockServiceLocksAVaultNotShownAsACollection(t *testing.T) {
 	}
 	conn := bus.Conn(t)
 	var cols dbus.Variant
-	if err := conn.Object(BusName, rootPath).Call("org.freedesktop.DBus.Properties.Get", 0, ifaceService, "Collections").Store(&cols); err != nil {
+	if err := conn.Object(BusName, rootPath).Call("org.freedesktop.DBus.Properties.Get", 0, secretbus.ServiceInterface, "Collections").Store(&cols); err != nil {
 		t.Fatal(err)
 	}
 	if got := cols.Value().([]dbus.ObjectPath); slices.Contains(got, collectionPath(VaultID)) {
 		t.Errorf("Collections = %v shows the hidden vault", got)
 	}
-	if err := conn.Object(BusName, rootPath).Call(ifaceService+".LockService", 0).Err; err != nil {
+	if err := conn.Object(BusName, rootPath).Call(secretbus.ServiceInterface+".LockService", 0).Err; err != nil {
 		t.Fatal(err)
 	}
 	if _, open := v.Logins(); open {

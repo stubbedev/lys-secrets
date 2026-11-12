@@ -16,6 +16,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/client"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 )
 
 func confirmingFixture(t *testing.T) *fixture {
@@ -135,50 +136,50 @@ func TestADeniedReadDismissesThePromptAndReturnsNoSecret(t *testing.T) {
 
 	root := foreign.Object(BusName, rootPath)
 	var unlocked, locked []dbus.ObjectPath
-	if err := root.Call(ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil || len(unlocked) != 0 || len(locked) != 1 {
+	if err := root.Call(secretbus.ServiceInterface+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil || len(unlocked) != 0 || len(locked) != 1 {
 		t.Fatalf("a foreign search = %v, %v, %v; want the item locked to it", unlocked, locked, err)
 	}
 	var session dbus.ObjectPath
 	var out dbus.Variant
-	if err := root.Call(ifaceService+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&out, &session); err != nil {
+	if err := root.Call(secretbus.ServiceInterface+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&out, &session); err != nil {
 		t.Fatal(err)
 	}
 	var secrets map[dbus.ObjectPath]Secret
-	if err := root.Call(ifaceService+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || len(secrets) != 0 {
+	if err := root.Call(secretbus.ServiceInterface+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || len(secrets) != 0 {
 		t.Errorf("a foreign GetSecrets before the dialog = %v, %v", secrets, err)
 	}
 	var secret Secret
-	err := foreign.Object(BusName, locked[0]).Call(ifaceItem+".GetSecret", 0, session).Store(&secret)
+	err := foreign.Object(BusName, locked[0]).Call(secretbus.ItemInterface+".GetSecret", 0, session).Store(&secret)
 	var de dbus.Error
 	if !errors.As(err, &de) || de.Name != errIsLocked {
 		t.Errorf("a foreign GetSecret before the dialog = %v, want IsLocked", err)
 	}
 	var done []dbus.ObjectPath
 	var prompt dbus.ObjectPath
-	if err := root.Call(ifaceService+".Unlock", 0, locked).Store(&done, &prompt); err != nil || len(done) != 0 || prompt == noPrompt {
+	if err := root.Call(secretbus.ServiceInterface+".Unlock", 0, locked).Store(&done, &prompt); err != nil || len(done) != 0 || prompt == noPrompt {
 		t.Fatalf("a foreign Unlock = %v, %q, %v; want a prompt", done, prompt, err)
 	}
 	if dismissed := f.showPrompt(t, foreign, prompt, ""); !dismissed {
 		t.Error("a denied read completed the prompt undismissed")
 	}
-	if err := root.Call(ifaceService+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || len(secrets) != 0 {
+	if err := root.Call(secretbus.ServiceInterface+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || len(secrets) != 0 {
 		t.Errorf("a foreign GetSecrets after Deny = %v, %v", secrets, err)
 	}
 
-	if err := root.Call(ifaceService+".Unlock", 0, locked).Store(&done, &prompt); err != nil || prompt == noPrompt {
+	if err := root.Call(secretbus.ServiceInterface+".Unlock", 0, locked).Store(&done, &prompt); err != nil || prompt == noPrompt {
 		t.Fatalf("a foreign Unlock = %v, %q, %v; want a prompt", done, prompt, err)
 	}
 	if dismissed := f.showPrompt(t, foreign, prompt, "allow"); dismissed {
 		t.Fatal("an allowed read dismissed the prompt")
 	}
-	if err := root.Call(ifaceService+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || string(secrets[locked[0]].Value) != "m41l" {
+	if err := root.Call(secretbus.ServiceInterface+".GetSecrets", 0, locked, session).Store(&secrets); err != nil || string(secrets[locked[0]].Value) != "m41l" {
 		t.Errorf("a foreign GetSecrets after Allow = %v, %v", secrets, err)
 	}
 	f.svc.LockCollections()
 	if err := f.svc.UnlockLogin([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Call(ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil || len(locked) != 1 {
+	if err := root.Call(secretbus.ServiceInterface+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil || len(locked) != 1 {
 		t.Errorf("after a lock the once-allowed item searches as %v, %v, %v; want it locked again", unlocked, locked, err)
 	}
 }
@@ -277,16 +278,16 @@ func TestWithoutConfirmationAReadAsksTheBusNothing(t *testing.T) {
 	}
 	root := reader.Object(BusName, rootPath)
 	var unlocked, locked []dbus.ObjectPath
-	if err := root.Call(ifaceService+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
+	if err := root.Call(secretbus.ServiceInterface+".SearchItems", 0, attrs).Store(&unlocked, &locked); err != nil {
 		t.Fatal(err)
 	}
 	var session dbus.ObjectPath
 	var out dbus.Variant
-	if err := root.Call(ifaceService+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&out, &session); err != nil {
+	if err := root.Call(secretbus.ServiceInterface+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&out, &session); err != nil {
 		t.Fatal(err)
 	}
 	var secret Secret
-	if err := reader.Object(BusName, unlocked[0]).Call(ifaceItem+".GetSecret", 0, session).Store(&secret); err != nil {
+	if err := reader.Object(BusName, unlocked[0]).Call(secretbus.ItemInterface+".GetSecret", 0, session).Store(&secret); err != nil {
 		t.Fatal(err)
 	}
 	if got := calls.Load(); got != 0 {

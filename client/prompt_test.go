@@ -9,6 +9,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/fdtest"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 )
 
 const fakePromptPath = dbus.ObjectPath("/org/freedesktop/secrets/prompt/1")
@@ -30,20 +31,20 @@ func (p *impersonatedPrompt) Prompt(string) *dbus.Error {
 }
 
 func (p *impersonatedPrompt) complete() error {
-	if err := promptCompleted.Emit(p.impostor, fakePromptPath, completion{Result: dbus.MakeVariant(p.fd)}); err != nil {
+	if err := secretbus.PromptCompleted.Emit(p.impostor, fakePromptPath, secretbus.Completion{Result: dbus.MakeVariant(p.fd)}); err != nil {
 		return err
 	}
 	if err := p.impostor.BusObject().Call("org.freedesktop.DBus.GetId", 0).Err; err != nil {
 		return err
 	}
-	return promptCompleted.Emit(p.provider, fakePromptPath, completion{Result: dbus.MakeVariant("the provider's")})
+	return secretbus.PromptCompleted.Emit(p.provider, fakePromptPath, secretbus.Completion{Result: dbus.MakeVariant("the provider's")})
 }
 
 func TestAPromptIsCompletedOnlyByTheProvider(t *testing.T) {
 	bus := dbustest.Start(t)
 	pipe := fdtest.New(t)
 	p := &impersonatedPrompt{provider: bus.Conn(t), impostor: bus.Conn(t), fd: pipe.Write, failed: make(chan error, 1)}
-	if err := p.provider.Export(p, fakePromptPath, ifacePrompt); err != nil {
+	if err := p.provider.Export(p, fakePromptPath, secretbus.PromptInterface); err != nil {
 		t.Fatal(err)
 	}
 	if reply, err := p.provider.RequestName(busName, dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {

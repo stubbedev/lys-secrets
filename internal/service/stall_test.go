@@ -15,6 +15,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 )
 
 // gate is a slow step a test decides the end of: the KDF, or a disk's fsync.
@@ -142,7 +143,7 @@ func TestChangeLockAndFirstLoginRunTheKDFWithoutTheLock(t *testing.T) {
 		t.Fatal(derr)
 	}
 	conn := f.bus.Conn(t)
-	if err := conn.Object(BusName, path).Call(ifacePrompt+".Prompt", 0, "").Err; err != nil {
+	if err := conn.Object(BusName, path).Call(secretbus.PromptInterface+".Prompt", 0, "").Err; err != nil {
 		t.Fatal(err)
 	}
 	f.kdf.reached(t, "the new password's KDF")
@@ -445,25 +446,25 @@ func TestABlockedBusHoldsNoRead(t *testing.T) {
 	entered, release := make(chan struct{}, 1), make(chan struct{})
 	var mu sync.Mutex
 	var sent []string
-	queue := newSignalQueue(func(_ dbus.ObjectPath, name string, _ ...any) error {
-		mu.Lock()
-		sent = append(sent, name)
-		mu.Unlock()
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-release
-		return nil
-	})
+	queue := newSignalQueue()
 	f.svc.mu.Lock()
 	f.svc.signals = queue
 	f.svc.mu.Unlock()
-	for i, name := range []string{"first", "second", "third"} {
+	for _, name := range []string{"first", "second", "third"} {
 		err := f.svc.change(c, func(kr *keyring.Collection) error {
 			return kr.SetLabel(name, f.svc.now())
 		}, func() error {
-			f.svc.emitLocked(rootPath, name, i)
+			f.svc.signals.post(func() error {
+				mu.Lock()
+				sent = append(sent, name)
+				mu.Unlock()
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+				return nil
+			})
 			return nil
 		})
 		if err != nil {
@@ -492,18 +493,15 @@ func TestABlockedBusHoldsNoRead(t *testing.T) {
 
 func TestSignalsPastTheBoundAreDroppedAndTheQueueIsBounded(t *testing.T) {
 	entered, release := make(chan struct{}, 1), make(chan struct{})
-	queue := newSignalQueue(func(dbus.ObjectPath, string, ...any) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
+	queue := newSignalQueue()
+	queue.post(func() error {
+		entered <- struct{}{}
 		<-release
 		return nil
 	})
-	queue.post(rootPath, "first")
 	<-entered
 	for range 4 * maxPendingSignals {
-		queue.post(rootPath, "flood")
+		queue.post(func() error { return nil })
 	}
 	queue.mu.Lock()
 	pending, dropped := len(queue.pending), queue.dropped
@@ -518,11 +516,11 @@ func TestSignalsPastTheBoundAreDroppedAndTheQueueIsBounded(t *testing.T) {
 func TestAClosingServiceDoesNotWaitOnABlockedBus(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	queue := newSignalQueue(func(dbus.ObjectPath, string, ...any) error {
+	queue := newSignalQueue()
+	queue.post(func() error {
 		<-release
 		return nil
 	})
-	queue.post(rootPath, "stuck")
 	timeout := make(chan time.Time)
 	close(timeout)
 	queue.drain(timeout)

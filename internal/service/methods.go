@@ -13,6 +13,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
+	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/transport"
 )
 
@@ -43,7 +44,7 @@ func (m serviceMethods) OpenSession(sender dbus.Sender, algorithm string, input 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.newPathLocked(sessionBase)
-	off, err := dbusx.Export(s.conn, path, dbusx.Interface{Name: ifaceSession, Methods: sessionMethods{s, path}})
+	off, err := dbusx.Export(s.conn, path, dbusx.Interface{Name: secretbus.SessionInterface, Methods: sessionMethods{s, path}})
 	if err != nil {
 		return dbus.Variant{}, "", dbusx.Failed(err.Error())
 	}
@@ -451,7 +452,7 @@ func (m collectionMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.emitLocked(rootPath, ifaceService+".CollectionDeleted", collectionPath(c.id))
+	emit(s, secretbus.CollectionDeleted, rootPath, secretbus.CollectionEvent{Collection: collectionPath(c.id)})
 	return noPrompt, nil
 }
 
@@ -547,13 +548,13 @@ func (s *Service) createItem(c *collection, label string, attrs map[string]strin
 	}, func() error {
 		path := itemPath(c.id, id)
 		if !created {
-			s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", path)
+			emit(s, secretbus.ItemChanged, collectionPath(c.id), secretbus.ItemEvent{Item: path})
 			return nil
 		}
 		if err := s.exportItemLocked(c, id); err != nil {
 			return err
 		}
-		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemCreated", path)
+		emit(s, secretbus.ItemCreated, collectionPath(c.id), secretbus.ItemEvent{Item: path})
 		return nil
 	})
 	if err != nil {
@@ -583,7 +584,7 @@ func (m itemMethods) Delete() (dbus.ObjectPath, *dbus.Error) {
 			off()
 			delete(c.items, m.id)
 		}
-		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemDeleted", itemPath(c.id, m.id))
+		emit(s, secretbus.ItemDeleted, collectionPath(c.id), secretbus.ItemEvent{Item: itemPath(c.id, m.id)})
 		return nil
 	})
 	if err != nil {
@@ -643,7 +644,7 @@ func (m itemMethods) SetSecret(sender dbus.Sender, secret Secret) *dbus.Error {
 	err = s.change(c, func(kr *keyring.Collection) error {
 		return kr.SetSecret(m.id, value, secret.ContentType, owner, s.now())
 	}, func() error {
-		s.emitLocked(collectionPath(c.id), ifaceCollection+".ItemChanged", itemPath(c.id, m.id))
+		emit(s, secretbus.ItemChanged, collectionPath(c.id), secretbus.ItemEvent{Item: itemPath(c.id, m.id)})
 		return nil
 	})
 	if err != nil {
@@ -687,7 +688,7 @@ func (s *Service) newPrompt(run func(ctx context.Context) (bool, dbus.Variant)) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := &prompt{s: s, path: s.newPathLocked(promptBase), run: run}
-	off, err := dbusx.Export(s.conn, p.path, dbusx.Interface{Name: ifacePrompt, Methods: promptMethods{p}})
+	off, err := dbusx.Export(s.conn, p.path, dbusx.Interface{Name: secretbus.PromptInterface, Methods: promptMethods{p}, Signals: []dbusx.SignalDecl{secretbus.PromptCompleted}})
 	if err != nil {
 		return "", dbusx.Failed(err.Error())
 	}
@@ -735,7 +736,7 @@ func (m promptMethods) Dismiss() *dbus.Error {
 }
 
 func (p *prompt) complete(dismissed bool, result dbus.Variant) {
-	p.s.signals.post(p.path, ifacePrompt+".Completed", dismissed, result)
+	emit(p.s, secretbus.PromptCompleted, p.path, secretbus.Completion{Dismissed: dismissed, Result: result})
 	p.s.mu.Lock()
 	delete(p.s.prompts, p.path)
 	p.s.mu.Unlock()

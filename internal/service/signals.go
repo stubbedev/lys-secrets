@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stubbedev/lys-lib/dbusx"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 )
 
@@ -14,21 +15,13 @@ const (
 	signalDrainWait   = 2 * time.Second
 )
 
-type signal struct {
-	path dbus.ObjectPath
-	name string
-	args []any
-}
-
 // signalQueue sends signals in the order they were raised on one goroutine,
 // because a write to a stalled bus blocks, and it must not do so with the service's
 // lock held. Past its bound it drops signals and says so: they say something
 // changed, and whoever missed one can read the state again.
 type signalQueue struct {
-	emit func(path dbus.ObjectPath, name string, args ...any) error
-
 	mu      sync.Mutex
-	pending []signal
+	pending []func() error
 	dropped int
 	closed  bool
 
@@ -36,20 +29,20 @@ type signalQueue struct {
 	done chan struct{}
 }
 
-func newSignalQueue(emit func(dbus.ObjectPath, string, ...any) error) *signalQueue {
-	q := &signalQueue{emit: emit, wake: make(chan struct{}, 1), done: make(chan struct{})}
+func newSignalQueue() *signalQueue {
+	q := &signalQueue{wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go q.run()
 	return q
 }
 
-func (q *signalQueue) post(path dbus.ObjectPath, name string, args ...any) {
+func (q *signalQueue) post(emit func() error) {
 	q.mu.Lock()
 	if q.closed || len(q.pending) >= maxPendingSignals {
 		q.dropped++
 		q.mu.Unlock()
 		return
 	}
-	q.pending = append(q.pending, signal{path, name, args})
+	q.pending = append(q.pending, emit)
 	q.mu.Unlock()
 	select {
 	case q.wake <- struct{}{}:
@@ -67,9 +60,9 @@ func (q *signalQueue) run() {
 		if dropped > 0 {
 			log.Printf("secrets: the bus stopped taking signals, so %d were dropped", dropped)
 		}
-		for _, s := range pending {
-			if err := q.emit(s.path, s.name, s.args...); err != nil {
-				log.Printf("secrets: emit %s: %v", s.name, err)
+		for _, emit := range pending {
+			if err := emit(); err != nil {
+				log.Printf("secrets: %v", err)
 			}
 		}
 		if len(pending) > 0 {
@@ -96,4 +89,8 @@ func (q *signalQueue) drain(timeout <-chan time.Time) {
 	case <-timeout:
 		log.Printf("secrets: the bus stopped taking signals, so the service closes without them")
 	}
+}
+
+func emit[T any](s *Service, sig dbusx.Signal[T], path dbus.ObjectPath, v T) {
+	s.signals.post(func() error { return sig.Emit(s.conn, path, v) })
 }
