@@ -13,7 +13,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
-	"github.com/stubbedev/lys-secrets/internal/secretbus"
+	"github.com/stubbedev/lys-secrets/secretbus"
 	"github.com/stubbedev/lys-secrets/transport"
 )
 

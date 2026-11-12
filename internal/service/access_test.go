@@ -16,7 +16,7 @@ import (
 
 	"github.com/stubbedev/lys-secrets/client"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
-	"github.com/stubbedev/lys-secrets/internal/secretbus"
+	"github.com/stubbedev/lys-secrets/secretbus"
 )
 
 func confirmingFixture(t *testing.T) *fixture {

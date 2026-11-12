@@ -15,7 +15,7 @@ import (
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
 	"github.com/stubbedev/lys-secrets/internal/keyring"
-	"github.com/stubbedev/lys-secrets/internal/secretbus"
+	"github.com/stubbedev/lys-secrets/secretbus"
 )
 
 // gate is a slow step a test decides the end of: the KDF, or a disk's fsync.

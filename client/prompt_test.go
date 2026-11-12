@@ -8,7 +8,7 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-secrets/internal/secretbus"
+	"github.com/stubbedev/lys-secrets/secretbus"
 )
 
 const fakePromptPath = dbus.ObjectPath("/org/freedesktop/secrets/prompt/1")

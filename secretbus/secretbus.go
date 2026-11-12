@@ -1,3 +1,6 @@
+// Package secretbus declares the Secret Service's D-Bus interfaces, events
+// and signals once, for the service that emits them and the clients that
+// follow them.
 package secretbus
 
 import (
