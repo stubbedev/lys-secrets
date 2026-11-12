@@ -12,7 +12,6 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 
 	"github.com/stubbedev/lys-secrets/client"
-	"github.com/stubbedev/lys-secrets/internal/fdtest"
 	"github.com/stubbedev/lys-secrets/internal/secretbus"
 	"github.com/stubbedev/lys-secrets/secretstest"
 )
@@ -125,7 +124,7 @@ func TestWatchItemsClosesTheDescriptorsOfAnImpostorsAnnouncement(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Stop() })
-	pipe := fdtest.New(t)
+	pipe := dbustest.NewPipe(t)
 	impostor := bus.Conn(t)
 	if err := impostor.Emit(client.LoginCollection, secretbus.ItemCreated.Name(), client.LoginCollection+"/9", pipe.Write); err != nil {
 		t.Fatal(err)

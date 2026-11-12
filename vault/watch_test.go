@@ -7,8 +7,6 @@ import (
 
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
-
-	"github.com/stubbedev/lys-secrets/internal/fdtest"
 )
 
 func awaitStatus(t *testing.T, statuses <-chan Status, what string) Status {
@@ -68,7 +66,7 @@ func TestWatchClosesTheDescriptorsOfAnImpostorsSignal(t *testing.T) {
 	if err := conn.AddMatchSignal(dbus.WithMatchInterface(iface)); err != nil {
 		t.Fatal(err)
 	}
-	pipe := fdtest.New(t)
+	pipe := dbustest.NewPipe(t)
 	impostor := bus.conn()
 	if err := impostor.Emit(ServicePath, changed.Name(), toWire(Status{State: StateUnlocked}), pipe.Write); err != nil {
 		t.Fatal(err)

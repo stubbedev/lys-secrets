@@ -861,19 +861,6 @@ func (s *Service) lockCollectionLocked(c *collection) {
 	emit(s, secretbus.CollectionChanged, rootPath, secretbus.CollectionEvent{Collection: collectionPath(c.id)})
 }
 
-const (
-	messageBus = "org.freedesktop.DBus"
-	busPath    = dbus.ObjectPath("/org/freedesktop/DBus")
-)
-
-type ownerChange struct {
-	Name     string `dbus:"name"`
-	OldOwner string `dbus:"old_owner"`
-	NewOwner string `dbus:"new_owner"`
-}
-
-var nameOwnerChanged = dbusx.NewSignal[ownerChange](messageBus, "NameOwnerChanged")
-
 // watchLeavers closes a client's sessions when it leaves the bus. The
 // stop it adds to s.stops only cancels the watch, since its handler
 // takes s.mu, which the stops run under; stopWatchingLeavers, called
@@ -882,7 +869,7 @@ func (s *Service) watchLeavers() error {
 	watching, cancel := context.WithCancel(context.Background())
 	w, err := dbusx.WatchSignals(watching, s.conn, dbusx.FromBus(),
 		func(err error) { log.Printf("secrets: watch bus clients: %v", err) },
-		dbusx.On(nameOwnerChanged, busPath, s.closeSessionsOfLeaver))
+		dbusx.OnNameLost(s.closeSessionsOfLeaver))
 	if err != nil {
 		cancel()
 		return fmt.Errorf("watch bus clients: %w", err)
@@ -906,19 +893,19 @@ func (s *Service) stopWatchingLeavers() error {
 
 // closeSessionsOfLeaver closes the sessions of a connection that left
 // the bus, and forgets what it was allowed and who it was.
-func (s *Service) closeSessionsOfLeaver(change ownerChange, _ dbus.Sequence) error {
-	if change.NewOwner != "" || !strings.HasPrefix(change.Name, ":") {
+func (s *Service) closeSessionsOfLeaver(name string, _ dbus.Sequence) error {
+	if !strings.HasPrefix(name, ":") {
 		return nil
 	}
-	s.peers.forget(change.Name)
+	s.peers.forget(name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for path, sess := range s.sessions {
-		if sess.owner == change.Name {
+		if sess.owner == name {
 			s.closeSessionLocked(path)
 		}
 	}
-	delete(s.grants, change.Name)
+	delete(s.grants, name)
 	return nil
 }
 

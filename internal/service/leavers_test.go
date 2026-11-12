@@ -8,7 +8,6 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-secrets/internal/fdtest"
 	"github.com/stubbedev/lys-secrets/internal/keyring"
 )
 
@@ -23,7 +22,7 @@ func TestTheDescriptorsOfSignalsTheLeaverWatchDropsAreClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = f.svc.conn.RemoveMatchSignal(rule...) })
-	pipe := fdtest.New(t)
+	pipe := dbustest.NewPipe(t)
 	client := f.bus.Conn(t)
 	sess := openSession(t, client)
 	if err := client.Emit("/", testInterface+".Hand", pipe.Write); err != nil {

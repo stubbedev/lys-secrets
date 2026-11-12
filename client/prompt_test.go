@@ -8,7 +8,6 @@ import (
 	"github.com/stubbedev/lys-lib/dbustest"
 	dbus "github.com/stubbedev/lys-lib/third_party/godbus"
 
-	"github.com/stubbedev/lys-secrets/internal/fdtest"
 	"github.com/stubbedev/lys-secrets/internal/secretbus"
 )
 
@@ -42,7 +41,7 @@ func (p *impersonatedPrompt) complete() error {
 
 func TestAPromptIsCompletedOnlyByTheProvider(t *testing.T) {
 	bus := dbustest.Start(t)
-	pipe := fdtest.New(t)
+	pipe := dbustest.NewPipe(t)
 	p := &impersonatedPrompt{provider: bus.Conn(t), impostor: bus.Conn(t), fd: pipe.Write, failed: make(chan error, 1)}
 	if err := p.provider.Export(p, fakePromptPath, secretbus.PromptInterface); err != nil {
 		t.Fatal(err)
