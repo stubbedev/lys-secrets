@@ -32,7 +32,7 @@ jobs:
               with:
                   persist-credentials: false
 
-            - uses: stubbedev/lys-ci/.github/actions/nix-setup@bf3da3ebd3253f33f2f7696b4284986772da635f
+            - uses: stubbedev/lys-ci/.github/actions/nix-setup@fc87539c0a5bd989cfc802c6112ad31a6daf8db4
               with:
                 github-token: ${{ secrets.GITHUB_TOKEN }}
             - name: just check

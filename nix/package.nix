@@ -1,5 +1,6 @@
 {
   perSystem = {
+    inputs',
     lib,
     pkgs,
     ...
@@ -16,7 +17,7 @@
       );
     };
   in {
-    packages.default = pkgs.buildGo127Module {
+    packages.default = (pkgs.buildGoModule.override {go = inputs'.devtools.packages.go;}) {
       pname = "lys-secrets";
       version = "0-unstable-${lib.substring 0 8 (builtins.unsafeDiscardStringContext (baseNameOf src))}";
 

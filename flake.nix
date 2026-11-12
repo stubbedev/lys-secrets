@@ -7,6 +7,11 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+    devtools = {
+      url = "github:stubbedev/flakes.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-parts.follows = "flake-parts";
+    };
     # The home-manager module's evaluation check.
     home-manager = {
       url = "github:nix-community/home-manager";
