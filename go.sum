@@ -1,7 +1,7 @@
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
-github.com/stubbedev/lys-lib v0.3.22-0.20261113172706-c588c8a0edf8 h1:mQTKzqSQN0K6Yd3QaKU+3X7Q9EmBrjPXf3K5j5oWdwQ=
-github.com/stubbedev/lys-lib v0.3.22-0.20261113172706-c588c8a0edf8/go.mod h1:+d6jqP2R9I4xH/NMGV9KJmKS7yV7/3NzG6JhaOkGqu4=
+github.com/stubbedev/lys-lib v0.3.22-0.20261113175459-3b11f791780d h1:uscUuiB4XXhziomE2RCQYC//W9BnvdgskPusE0t+Iec=
+github.com/stubbedev/lys-lib v0.3.22-0.20261113175459-3b11f791780d/go.mod h1:+d6jqP2R9I4xH/NMGV9KJmKS7yV7/3NzG6JhaOkGqu4=
 golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
 golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
